@@ -153,6 +153,20 @@
           <span class="label">Last error</span>
           <span id="status-error" class="meta">-</span>
         </div>
+        <div class="row">
+          <div class="stat">
+            <span class="label">Version</span>
+            <div class="meta">
+              <div id="status-version-app">App -</div>
+              <div id="status-version-ytdlp">yt-dlp -</div>
+              <div id="status-version-python">Py -</div>
+            </div>
+          </div>
+          <div class="stat">
+            <span class="label">Update</span>
+            <span id="status-update" class="meta">-</span>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -308,6 +322,14 @@
             <span>Options</span>
             <textarea id="cfg-yt-dlp-opts" rows="6" placeholder='{"format_sort": ["res", "codec"]}'></textarea>
           </label>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Maintenance</div>
+          <div class="row">
+            <button id="ytdlp-update" class="button ghost">Update yt-dlp</button>
+            <div id="ytdlp-update-message" class="notice" role="status"></div>
+          </div>
         </div>
 
         <div class="row">

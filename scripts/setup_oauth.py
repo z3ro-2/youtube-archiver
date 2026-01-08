@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
 Usage:
-  python setup_oauth.py --account main tokens/client_secret_main.json tokens/token_main.json
+  python scripts/setup_oauth.py --account main tokens/client_secret_main.json tokens/token_main.json
 
 This will run the OAuth flow and save the token to tokens/token_main.json
 """
+import os
 import sys
 import argparse, json
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from engine.paths import TOKENS_DIR, ensure_dir, resolve_dir
 

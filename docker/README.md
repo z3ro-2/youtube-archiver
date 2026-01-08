@@ -1,16 +1,27 @@
-Docker assets placeholder.
+Docker assets for youtube-archiver.
 
-This directory is reserved for Docker-related files (Dockerfile/compose/scripts).
-When a Dockerfile is added, the suggested exposed port is 8090.
+Quick start
+- Build: `docker build -f docker/Dockerfile -t youtube-archiver:latest .`
+- Compose: use `docker/docker-compose.yml.example` as your base.
 
-Dockerization prep notes
-- Bind to all interfaces in containers by setting `YT_ARCHIVER_HOST=0.0.0.0`.
-- Expose port 8090 (or any host-mapped port) and keep internal port 8000 unless overridden.
-- Use volume mounts + env vars to make paths portable:
-  - `/config` → `YT_ARCHIVER_CONFIG_DIR=/config`
-  - `/downloads` → `YT_ARCHIVER_DOWNLOADS_DIR=/downloads`
-  - `/data` → `YT_ARCHIVER_DATA_DIR=/data`
-  - `/logs` → `YT_ARCHIVER_LOG_DIR=/logs`
-  - `/tokens` → `YT_ARCHIVER_TOKENS_DIR=/tokens`
-- Use relative paths in `config.json` (e.g. `folder: "YouTube/Channel"`).
-- Consider running as a non-root user with a fixed UID/GID to match your mounted volume permissions.
+Ports
+- Internal: 8000
+- Suggested host mapping: 8090
+
+Volumes + paths
+- `/config` → config JSON
+- `/downloads` → completed media
+- `/data` → SQLite + temp dirs
+- `/logs` → logs
+- `/tokens` → OAuth tokens + client secrets
+
+Use relative paths inside `config.json` (e.g. `folder: "YouTube/Channel"`).
+
+Version build arg
+```bash
+docker build -f docker/Dockerfile --build-arg YT_ARCHIVER_VERSION=1.1.0 -t youtube-archiver:latest .
+```
+
+Notes
+- Bind to all interfaces in containers with `YT_ARCHIVER_HOST=0.0.0.0` if needed.
+- Consider running as a non-root user with a fixed UID/GID to match volume permissions.

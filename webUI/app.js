@@ -12,6 +12,7 @@ const state = {
   configNoticeClearable: false,
   currentPage: "home",
   actionButtons: null,
+  runtimeInfo: null,
 };
 const browserState = {
   open: false,
@@ -30,6 +31,11 @@ const BROWSE_DEFAULTS = {
   mediaRoot: "",
   tokensDir: "",
 };
+const GITHUB_REPO = "z3ro-2/youtube-archiver";
+const GITHUB_RELEASE_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+const GITHUB_RELEASE_PAGE = "https://github.com/z3ro-2/youtube-archiver/releases";
+const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at";
+const RELEASE_CACHE_KEY = "yt_archiver_release_cache";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -89,6 +95,7 @@ function setPage(page) {
     refreshStatus();
     refreshSchedule();
     refreshMetrics();
+    refreshVersion();
   } else if (target === "config") {
     if (!state.config || !state.configDirty) {
       loadConfig();
@@ -165,6 +172,34 @@ function formatDuration(seconds) {
     return `${mins}m ${secs}s`;
   }
   return `${secs}s`;
+}
+
+function normalizeVersionTag(tag) {
+  if (!tag) return "";
+  return tag.trim().replace(/^v/i, "");
+}
+
+function sanitizeVersionTag(tag) {
+  return (tag || "").replace(/[^0-9A-Za-z._-]/g, "");
+}
+
+function parseVersion(tag) {
+  const clean = normalizeVersionTag(tag);
+  const parts = clean.split(".");
+  return parts.map((part) => parseInt(part, 10) || 0);
+}
+
+function compareVersions(current, latest) {
+  const a = parseVersion(current);
+  const b = parseVersion(latest);
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i += 1) {
+    const left = a[i] || 0;
+    const right = b[i] || 0;
+    if (left > right) return 1;
+    if (left < right) return -1;
+  }
+  return 0;
 }
 
 function formatTimestamp(value) {
@@ -304,6 +339,100 @@ async function fetchJson(url, options = {}) {
     throw new Error(`${response.status} ${text}`);
   }
   return response.json();
+}
+
+function updateVersionDisplay(info) {
+  if (!info) return;
+  const appVersion = normalizeVersionTag(info.app_version || "") || "0.0.0";
+  const ytDlpVersion = info.yt_dlp_version || "-";
+  const pyVersion = info.python_version || "-";
+  const appEl = $("#status-version-app");
+  const ytdlpEl = $("#status-version-ytdlp");
+  const pyEl = $("#status-version-python");
+  if (appEl) appEl.textContent = `App ${appVersion}`;
+  if (ytdlpEl) ytdlpEl.textContent = `yt-dlp ${ytDlpVersion}`;
+  if (pyEl) pyEl.textContent = `Py ${pyVersion}`;
+}
+
+function applyReleaseStatus(currentVersion, latestTag) {
+  const updateEl = $("#status-update");
+  if (!updateEl) return;
+  const latest = normalizeVersionTag(latestTag);
+  const current = normalizeVersionTag(currentVersion || "");
+  if (!latest) {
+    updateEl.textContent = "-";
+    return;
+  }
+  const safeTag = sanitizeVersionTag(latest);
+  const link = document.createElement("a");
+  link.href = GITHUB_RELEASE_PAGE;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = `v${safeTag}`;
+
+  updateEl.textContent = "";
+  const cmp = compareVersions(current, latest);
+  if (cmp < 0) {
+    updateEl.append("App update: ");
+    updateEl.appendChild(link);
+    return;
+  }
+  if (!current || current === "0.0.0") {
+    updateEl.append("Latest: ");
+    updateEl.appendChild(link);
+    return;
+  }
+  updateEl.append("Up to date: ");
+  updateEl.appendChild(link);
+}
+
+async function checkRelease(currentVersion) {
+  const now = Date.now();
+  const lastCheck = parseInt(localStorage.getItem(RELEASE_CHECK_KEY) || "0", 10);
+  const cachedRaw = localStorage.getItem(RELEASE_CACHE_KEY);
+  let cached = null;
+  if (cachedRaw) {
+    try {
+      cached = JSON.parse(cachedRaw);
+    } catch (err) {
+      cached = null;
+    }
+  }
+
+  if (lastCheck && now - lastCheck < 24 * 60 * 60 * 1000 && cached) {
+    applyReleaseStatus(currentVersion, cached.tag);
+    return;
+  }
+
+  try {
+    const response = await fetch(GITHUB_RELEASE_URL, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    const tag = data.tag_name || "";
+    localStorage.setItem(RELEASE_CHECK_KEY, String(now));
+    localStorage.setItem(RELEASE_CACHE_KEY, JSON.stringify({ tag }));
+    applyReleaseStatus(currentVersion, tag);
+  } catch (err) {
+    if (cached) {
+      applyReleaseStatus(currentVersion, cached.tag);
+    }
+  }
+}
+
+async function refreshVersion() {
+  try {
+    const info = await fetchJson("/api/version");
+    state.runtimeInfo = info;
+    updateVersionDisplay(info);
+    await checkRelease(info.app_version || "");
+  } catch (err) {
+    const versionEl = $("#status-version");
+    if (versionEl) {
+      versionEl.textContent = "-";
+    }
+  }
 }
 
 async function loadPaths() {
@@ -832,10 +961,20 @@ function addAccountRow(name = "", data = {}) {
   row.dataset.original = JSON.stringify(data || {});
   row.innerHTML = `
     <input class="account-name" type="text" placeholder="name" value="${name}">
-    <input class="account-client" type="text" placeholder="tokens/client_secret.json" value="${data.client_secret || ""}">
-    <button class="button ghost small browse-client" type="button">Browse</button>
-    <input class="account-token" type="text" placeholder="tokens/token.json" value="${data.token || ""}">
-    <button class="button ghost small browse-token" type="button">Browse</button>
+    <label class="field">
+      <span>Client Secret</span>
+      <div class="row tight">
+        <input class="account-client" type="text" placeholder="tokens/client_secret.json" value="${data.client_secret || ""}">
+        <button class="button ghost small browse-client" type="button">Browse</button>
+      </div>
+    </label>
+    <label class="field">
+      <span>Token</span>
+      <div class="row tight">
+        <input class="account-token" type="text" placeholder="tokens/token.json" value="${data.token || ""}">
+        <button class="button ghost small browse-token" type="button">Browse</button>
+      </div>
+    </label>
     <button class="button ghost remove">Remove</button>
   `;
   row.querySelector(".remove").addEventListener("click", () => row.remove());
@@ -874,6 +1013,9 @@ function addPlaylistRow(entry = {}) {
     </label>
     <button class="button ghost remove">Remove</button>
   `;
+  const separator = document.createElement("div");
+  separator.className = "playlist-separator";
+  row.appendChild(separator);
   row.querySelector(".remove").addEventListener("click", () => row.remove());
   row.querySelector(".browse-folder").addEventListener("click", () => {
     const target = row.querySelector(".playlist-folder");
@@ -1070,6 +1212,16 @@ async function saveConfig() {
   }
 }
 
+async function updateYtdlp() {
+  try {
+    setNotice($("#ytdlp-update-message"), "Starting yt-dlp update...", false);
+    await fetchJson("/api/yt-dlp/update", { method: "POST" });
+    setNotice($("#ytdlp-update-message"), "Update started. Restart container after completion.", false);
+  } catch (err) {
+    setNotice($("#ytdlp-update-message"), `Update failed: ${err.message}`, true);
+  }
+}
+
 async function startRun(payload) {
   try {
     setNotice($("#run-message"), "Starting run...", false);
@@ -1214,6 +1366,10 @@ function bindEvents() {
   $("#schedule-save").addEventListener("click", saveSchedule);
   $("#schedule-run-now").addEventListener("click", runScheduleNow);
   $("#save-config").addEventListener("click", saveConfig);
+  const ytdlpUpdate = $("#ytdlp-update");
+  if (ytdlpUpdate) {
+    ytdlpUpdate.addEventListener("click", updateYtdlp);
+  }
   $("#reset-config").addEventListener("click", async () => {
     await loadConfig();
     setConfigNotice("Config reloaded", false);

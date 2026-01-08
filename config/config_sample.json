@@ -16,7 +16,7 @@
     {
       "name": "Playlist Name",
       "playlist_id": "PLXXXXXXXXXXXXXXXXXXXXXXX",
-      "folder": "/path/to/output/folder",
+      "folder": "Videos/ChannelName",
       "account": "example_account",
       "remove_after_download": false,
       "final_format": "webm"
@@ -31,5 +31,5 @@
     "bot_token": "",
     "chat_id": ""
   },
-  "single_download_folder": "downloads"
+  "single_download_folder": "Singles"
 }

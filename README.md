@@ -21,6 +21,7 @@ Highlights
 	•	Background runs with live playlist + video progress
 	•	SQLite history with search, filter, and sort
 	•	Optional Telegram run summaries
+	•	Manual yt-dlp update button (restart required)
 	•	Optional Basic auth and reverse-proxy support
 	•	Home Assistant–friendly status and metrics endpoints
 
@@ -52,7 +53,7 @@ cp config/config_sample.json config/config.json
 
 3) (OPTIONAL - Also available in webUI) Generate OAuth tokens:
 ```bash
-python setup_oauth.py --account family_tv tokens/client_secret_family.json tokens/token_family.json
+python scripts/setup_oauth.py --account family_tv tokens/client_secret_family.json tokens/token_family.json
 ```
 
 4) Edit `config/config.json`:
@@ -84,8 +85,10 @@ The Web UI is served by the API and talks only to REST endpoints. It provides:
 	•	History page with search, filter, sort, and limit controls
 	•	Logs page with manual refresh
 	•	Live playlist progress + per-video download progress
+	•	App version + update availability (GitHub release check)
 	•	Download buttons for completed files
 	•	Manual cleanup for temporary files
+	•	Manual yt-dlp update button (restart container after update)
 
 ## API overview
 Common endpoints:
@@ -129,6 +132,13 @@ docker compose up -d
 ```
 This preserves your config, database, logs, tokens, and downloads.
 
+## Versioning (Docker builds)
+The app reads its version from `YT_ARCHIVER_VERSION`. The Dockerfile exposes a build arg:
+```bash
+docker build -f docker/Dockerfile --build-arg YT_ARCHIVER_VERSION=1.1.0 -t youtube-archiver:latest .
+```
+This avoids keeping the version in Compose or runtime envs.
+
 ## Security model
 	•	Local-first design; no hosted or cloud mode
 	•	Optional Basic auth (off by default)
@@ -148,10 +158,11 @@ This project does not attempt to:
 	•	Keep config/config.json, tokens/, and the SQLite database out of version control
 	•	Downloads are staged in a temp directory and atomically copied to their final location
 	•	“Clear temporary files” only removes working directories (temp downloads + yt-dlp temp)
+	•	“Update yt-dlp” runs in-container and requires a container restart to take effect
 	•	YT_ARCHIVER_* environment variables can override paths (see .env.example)
 
 ## Release
-Current release: v1.0.0 (first public release). See `CHANGELOG.md` for details.
+Current release: v1.1.0. See `CHANGELOG.md` for details.
 
 ## Contributing
 Contributions are welcome. Please read `CONTRIBUTING.md` before opening a PR.

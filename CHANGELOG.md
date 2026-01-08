@@ -17,7 +17,7 @@ Added:
 - Home Assistant-friendly status and metrics endpoints via API.
 - desktop GUI deprecated
 
-## 1.0.1
+## 1.0.1 - Frontend UI Updates 
 Added:
 - Multi-page Web UI (Home, Config, Downloads, History, Logs) with top navigation.
 - Separate playlist progress vs per-video download progress indicators.
@@ -33,3 +33,12 @@ Changed:
 Fixed:
 - History “Copy URL” now copies the YouTube URL, not API download URL.
 - Config/playlist download paths normalized to remain relative to /downloads.
+
+## 1.1.0 - Version Control and YT-DLP Update Maintenance
+Added:
+- App version display and GitHub release check in Status.
+- Manual yt-dlp update button (requires restart).
+
+Changed:
+- Dockerfile build arg for `YT_ARCHIVER_VERSION`.
+

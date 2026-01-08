@@ -23,6 +23,7 @@ import logging
 import mimetypes
 import os
 import sqlite3
+import subprocess
 import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
@@ -161,6 +162,8 @@ async def startup():
     app.state.run_task = None
     app.state.loop = asyncio.get_running_loop()
     app.state.schedule_lock = threading.Lock()
+    app.state.ytdlp_update_lock = threading.Lock()
+    app.state.ytdlp_update_running = False
     app.state.scheduler = BackgroundScheduler(timezone="UTC")
     ensure_dir(DATA_DIR)
     ensure_dir(CONFIG_DIR)
@@ -326,6 +329,10 @@ def _iter_file(path, chunk_size=1024 * 1024):
             if not chunk:
                 break
             yield chunk
+
+
+def _yt_dlp_script_path():
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts", "update_yt_dlp.sh"))
 
 
 def _list_download_files(base_dir):
@@ -778,6 +785,29 @@ async def api_metrics():
 @app.get("/api/version")
 async def api_version():
     return get_runtime_info()
+
+
+@app.post("/api/yt-dlp/update")
+async def api_update_ytdlp():
+    script_path = _yt_dlp_script_path()
+    if not os.path.exists(script_path):
+        raise HTTPException(status_code=404, detail="update_yt_dlp.sh not found")
+
+    with app.state.ytdlp_update_lock:
+        if app.state.ytdlp_update_running:
+            raise HTTPException(status_code=409, detail="yt-dlp update already running")
+        app.state.ytdlp_update_running = True
+
+    def _run_update():
+        try:
+            logging.info("yt-dlp update started")
+            subprocess.run(["bash", script_path], check=False)
+            logging.info("yt-dlp update finished")
+        finally:
+            app.state.ytdlp_update_running = False
+
+    asyncio.create_task(anyio.to_thread.run_sync(_run_update))
+    return {"status": "started"}
 
 
 @app.get("/api/paths")
