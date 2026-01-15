@@ -1,4 +1,14 @@
 # YouTube Archiver
+ATTENTION!
+YouTube-Archiver is now rebranded as Retreivr and the live repo is being migrated to: 
+https://github.com/Retreivr/retreivr
+
+This repo will be set to Archive soon.
+v1.2.0 is the latest Release fully-functional and has a docker-package available to docker pull.
+
+v1.3.0 is coming soon and will be PACKED with amazing new features that really define what this project will be.
+
+I am excited to see where this project goes and thankful for your support and feedback!
 
 YouTube Archiver is a self-hosted tool for archiving YouTube playlists or individual videos with a clean Web UI, a simple API, and a Docker-first deployment model. For most users, the recommended install and best experience is the Docker container.
 
