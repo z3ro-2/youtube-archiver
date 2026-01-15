@@ -360,6 +360,41 @@ class SearchResolutionService:
                 ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_search_items(self, request_id):
+        return self._list_items(request_id)
+
+    def list_search_candidates(self, item_id):
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    item_id,
+                    source,
+                    url,
+                    title,
+                    uploader,
+                    artist_detected,
+                    album_detected,
+                    track_detected,
+                    duration_sec,
+                    artwork_url,
+                    score_artist,
+                    score_track,
+                    score_album,
+                    score_duration,
+                    source_modifier,
+                    penalty_multiplier,
+                    final_score,
+                    rank
+                FROM search_candidates
+                WHERE item_id=?
+                ORDER BY rank ASC
+                """,
+                (item_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def cancel_search_request(self, request_id):
         now = _utc_now()
         with self._connect() as conn:

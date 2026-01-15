@@ -12,6 +12,7 @@ from uuid import uuid4
 _ALLOWED_ORIGINS = {"playlist", "search"}
 _ALLOWED_MEDIA_TYPES = {"audio", "video"}
 _ALLOWED_MEDIA_INTENTS = {"track", "album", "playlist", "episode", "movie"}
+_JOB_STATUSES = {"queued", "running", "completed", "failed", "canceled"}
 _TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 _DEFAULT_MAX_ATTEMPTS = 3
 _DEFAULT_RETRY_DELAY_SECONDS = 30
@@ -341,6 +342,46 @@ class DownloadJobStore:
                 (origin, origin_id, url),
             ).fetchone()
             return row is not None
+
+    def list_jobs(self, *, status=None, source=None, limit=50):
+        if status and status not in _JOB_STATUSES:
+            raise ValueError("invalid status")
+        if isinstance(limit, str) and limit.isdigit():
+            limit = int(limit)
+        if not isinstance(limit, int):
+            limit = 50
+        limit = max(1, min(limit, 200))
+        source_value = (source or "").strip()
+        query = [
+            """
+            SELECT
+                id,
+                origin,
+                source,
+                media_intent,
+                status,
+                attempts,
+                created_at,
+                last_error
+            FROM download_jobs
+            """,
+        ]
+        params = []
+        where = []
+        if status:
+            where.append("status=?")
+            params.append(status)
+        if source_value:
+            where.append("source=?")
+            params.append(source_value)
+        if where:
+            query.append("WHERE " + " AND ".join(where))
+        query.append("ORDER BY created_at DESC LIMIT ?")
+        params.append(limit)
+        with self._connect() as conn:
+            ensure_download_jobs_table(conn)
+            rows = conn.execute("\n".join(query), params).fetchall()
+        return [dict(row) for row in rows]
 
     def list_ready_sources(self, *, now=None):
         now = now or _utc_now()
@@ -733,7 +774,11 @@ class YouTubeAdapter:
         media_audio = job.media_type == "audio"
         delivery_mode = context.get("delivery_mode") or "server"
         js_runtime = context.get("js_runtime") or engine_core.resolve_js_runtime(engine.config)
-        cookies_path = context.get("cookies_path") or engine_core.resolve_cookiefile(engine.config)
+        cookie_file = (
+            context.get("cookie_file")
+            or context.get("cookies_path")
+            or engine_core.resolve_cookiefile(engine.config)
+        )
         target_format = context.get("target_format")
         audio_only = bool(context.get("audio_only"))
 
@@ -745,8 +790,8 @@ class YouTubeAdapter:
                 yt_client,
                 video_id,
                 allow_public_fallback=True,
-                music_mode=media_audio,
-                cookies_path=cookies_path,
+                audio_mode=media_audio,
+                cookie_file=cookie_file,
             )
         if meta:
             meta["video_id"] = meta.get("video_id") or video_id
@@ -774,8 +819,8 @@ class YouTubeAdapter:
             paths=engine.paths,
             status=engine.status,
             stop_event=engine.stop_event,
-            music_mode=media_audio,
-            cookies_path=cookies_path,
+            audio_mode=media_audio,
+            cookie_file=cookie_file,
         )
         engine_core._reset_video_progress(engine.status)
         if not local_file:
@@ -823,7 +868,7 @@ class YouTubeAdapter:
         engine_core._status_set(engine.status, "last_completed_at", datetime.utcnow().isoformat())
         engine_core._status_set(engine.status, "last_completed_path", final_path if delivery_mode != "client" else None)
         if media_audio:
-            engine_core._enqueue_music_metadata(final_path, meta or {}, engine.config, music_mode=True)
+            engine_core._enqueue_music_metadata(final_path, meta or {}, engine.config, audio_mode=True)
 
         if job.origin == "playlist":
             playlist_id = job.origin_id

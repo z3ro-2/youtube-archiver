@@ -40,6 +40,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from engine.core import EngineStatus, get_status, load_config, read_history, run_archive, validate_config
+from engine.job_queue import DownloadJobStore
 from engine.paths import (
     CONFIG_DIR,
     DATA_DIR,
@@ -981,6 +982,16 @@ async def api_list_search_requests(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/search/requests/{request_id}/items")
+async def api_list_search_items(request_id: str):
+    return app.state.search_service.list_search_items(request_id)
+
+
+@app.get("/api/search/items/{item_id}/candidates")
+async def api_list_search_candidates(item_id: str):
+    return app.state.search_service.list_search_candidates(item_id)
+
+
 @app.post("/api/search/requests/{request_id}/cancel")
 async def api_cancel_search_request(request_id: str):
     canceled = app.state.search_service.cancel_search_request(request_id)
@@ -994,6 +1005,19 @@ async def api_search_run_once():
     config = _read_config_for_scheduler() or {}
     request_id = app.state.search_service.run_search_resolution_once(config=config)
     return {"request_id": request_id}
+
+
+@app.get("/api/download-jobs")
+async def api_list_download_jobs(
+    status: str | None = Query(None, max_length=20),
+    source: str | None = Query(None, max_length=50),
+    limit: int = Query(50, ge=1, le=200),
+):
+    try:
+        store = DownloadJobStore(app.state.paths.db_path)
+        return store.list_jobs(status=status, source=source, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/logs", response_class=PlainTextResponse)

@@ -13,6 +13,15 @@ const state = {
   currentPage: "home",
   actionButtons: null,
   runtimeInfo: null,
+  searchRequests: [],
+  searchItems: [],
+  searchCandidates: [],
+  selectedSearchRequest: null,
+  selectedSearchItem: null,
+  lastSearchRequestsKey: null,
+  lastSearchItemsKey: null,
+  lastSearchCandidatesKey: null,
+  lastDownloadJobsKey: null,
 };
 const browserState = {
   open: false,
@@ -43,6 +52,7 @@ const GITHUB_RELEASE_PAGE = "https://github.com/z3ro-2/youtube-archiver/releases
 const RELEASE_CHECK_KEY = "yt_archiver_release_checked_at";
 const RELEASE_CACHE_KEY = "yt_archiver_release_cache";
 const RELEASE_VERSION_KEY = "yt_archiver_release_app_version";
+const DEFAULT_SOURCE_PRIORITY = ["bandcamp", "youtube_music", "soundcloud"];
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -82,7 +92,7 @@ function setConfigNotice(message, isError = false, autoClear = false) {
 }
 
 function setPage(page) {
-  const allowed = new Set(["home", "config", "downloads", "history", "logs"]);
+  const allowed = new Set(["home", "config", "downloads", "search", "history", "logs"]);
   const target = allowed.has(page) ? page : "home";
   state.currentPage = target;
   document.body.classList.remove("nav-open");
@@ -111,6 +121,15 @@ function setPage(page) {
     refreshDownloads();
   } else if (target === "history") {
     refreshHistory();
+  } else if (target === "search") {
+    refreshSearchRequests();
+    refreshDownloadJobs();
+    if (state.selectedSearchRequest) {
+      refreshSearchItems();
+    }
+    if (state.selectedSearchItem) {
+      refreshSearchCandidates();
+    }
   } else if (target === "logs") {
     refreshLogs();
   }
@@ -214,6 +233,29 @@ function formatTimestamp(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
+}
+
+function formatScore(value) {
+  if (!Number.isFinite(value)) return "-";
+  return value.toFixed(3);
+}
+
+function formatSearchTarget(row) {
+  if (!row) return "";
+  const parts = [row.artist, row.album, row.track].filter((part) => part);
+  return parts.join(" / ");
+}
+
+function formatDetectedCandidate(row) {
+  if (!row) return "";
+  const parts = [row.artist_detected, row.album_detected, row.track_detected].filter((part) => part);
+  return parts.join(" / ");
+}
+
+function parseSourcePriority(value) {
+  if (!value) return [...DEFAULT_SOURCE_PRIORITY];
+  const list = value.split(",").map((item) => item.trim()).filter((item) => item);
+  return list.length ? list : [...DEFAULT_SOURCE_PRIORITY];
 }
 
 function downloadUrl(fileId) {
@@ -1036,6 +1078,307 @@ async function refreshDownloads() {
   }
 }
 
+function buildSearchRequestPayload() {
+  const payload = {
+    intent: $("#search-intent").value,
+    media_type: "audio",
+    artist: $("#search-artist").value.trim(),
+    include_albums: $("#search-include-albums").checked,
+    include_singles: $("#search-include-singles").checked,
+    lossless_only: $("#search-lossless-only").checked,
+    source_priority_json: parseSourcePriority($("#search-source-priority").value),
+  };
+  const album = $("#search-album").value.trim();
+  if (album) payload.album = album;
+  const track = $("#search-track").value.trim();
+  if (track) payload.track = track;
+  const minScore = parseFloat($("#search-min-score").value);
+  if (Number.isFinite(minScore)) payload.min_match_score = minScore;
+  const durationHint = parseInt($("#search-duration-hint").value, 10);
+  if (Number.isFinite(durationHint)) payload.duration_hint_sec = durationHint;
+  const qualityMin = parseInt($("#search-quality-min").value, 10);
+  if (Number.isFinite(qualityMin)) payload.quality_min_bitrate_kbps = qualityMin;
+  const maxCandidates = parseInt($("#search-max-candidates").value, 10);
+  if (Number.isFinite(maxCandidates)) payload.max_candidates_per_source = maxCandidates;
+  const createdBy = $("#search-created-by").value.trim();
+  if (createdBy) payload.created_by = createdBy;
+  return payload;
+}
+
+async function createSearchRequest() {
+  const message = $("#search-create-message");
+  const payload = buildSearchRequestPayload();
+  if (!payload.artist) {
+    setNotice(message, "Artist is required", true);
+    return;
+  }
+  try {
+    const data = await fetchJson("/api/search/requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    setNotice(message, `Created request ${data.request_id}`, false);
+    state.selectedSearchRequest = data.request_id;
+    state.selectedSearchItem = null;
+    $("#search-selected-request").textContent = `Selected request: ${data.request_id}`;
+    $("#search-selected-item").textContent = "Selected item: -";
+    await refreshSearchRequests();
+    await refreshSearchItems();
+    renderSearchCandidates([], "Select an item to view candidates.");
+  } catch (err) {
+    setNotice(message, `Create failed: ${err.message}`, true);
+  }
+}
+
+async function refreshSearchRequests() {
+  const message = $("#search-requests-message");
+  try {
+    const rows = await fetchJson("/api/search/requests?limit=200");
+    const key = JSON.stringify(rows);
+    if (key !== state.lastSearchRequestsKey) {
+      state.lastSearchRequestsKey = key;
+      renderSearchRequests(rows);
+    }
+    state.searchRequests = rows;
+    setNotice(message, "", false);
+  } catch (err) {
+    renderSearchRequests([]);
+    setNotice(message, `Search requests error: ${err.message}`, true);
+  }
+}
+
+function renderSearchRequests(rows) {
+  const body = $("#search-requests-body");
+  body.textContent = "";
+  if (!rows || !rows.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="7">No search requests found.</td>`;
+    body.appendChild(tr);
+    return;
+  }
+  rows.forEach((row) => {
+    const tr = document.createElement("tr");
+    const target = formatSearchTarget(row);
+    const created = formatTimestamp(row.created_at) || "";
+    const errorText = row.error || "";
+    tr.innerHTML = `
+      <td>${row.id || ""}</td>
+      <td>${target}</td>
+      <td>${row.intent || ""}</td>
+      <td>${row.status || ""}</td>
+      <td>${created}</td>
+      <td>${errorText}</td>
+      <td>
+        <div class="action-group">
+          <button class="button ghost small" data-search-action="select-request" data-id="${row.id}">Select</button>
+          <button class="button ghost small" data-search-action="run-resolution" data-id="${row.id}">Run Resolution</button>
+          <button class="button ghost small" data-search-action="cancel-request" data-id="${row.id}">Cancel</button>
+        </div>
+      </td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+async function runSearchResolution() {
+  const message = $("#search-requests-message");
+  try {
+    const data = await fetchJson("/api/search/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (data.request_id) {
+      setNotice(message, `Resolution started for ${data.request_id}`, false);
+    } else {
+      setNotice(message, "No queued requests available", false);
+    }
+    await refreshSearchRequests();
+    if (state.selectedSearchRequest) {
+      await refreshSearchItems();
+    }
+  } catch (err) {
+    setNotice(message, `Resolution failed: ${err.message}`, true);
+  }
+}
+
+async function cancelSearchRequest(requestId) {
+  const message = $("#search-requests-message");
+  try {
+    await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}/cancel`, {
+      method: "POST",
+    });
+    setNotice(message, `Canceled request ${requestId}`, false);
+    await refreshSearchRequests();
+    if (state.selectedSearchRequest === requestId) {
+      await refreshSearchItems();
+    }
+  } catch (err) {
+    setNotice(message, `Cancel failed: ${err.message}`, true);
+  }
+}
+
+function selectSearchRequest(requestId) {
+  state.selectedSearchRequest = requestId;
+  state.selectedSearchItem = null;
+  $("#search-selected-request").textContent = `Selected request: ${requestId}`;
+  $("#search-selected-item").textContent = "Selected item: -";
+  refreshSearchItems();
+  renderSearchCandidates([], "Select an item to view candidates.");
+}
+
+async function refreshSearchItems() {
+  const message = $("#search-items-message");
+  const requestId = state.selectedSearchRequest;
+  if (!requestId) {
+    renderSearchItems([], "Select a request to view items.");
+    return;
+  }
+  try {
+    const rows = await fetchJson(`/api/search/requests/${encodeURIComponent(requestId)}/items`);
+    const key = JSON.stringify(rows);
+    if (key !== state.lastSearchItemsKey) {
+      state.lastSearchItemsKey = key;
+      renderSearchItems(rows);
+    }
+    state.searchItems = rows;
+    setNotice(message, "", false);
+  } catch (err) {
+    renderSearchItems([], `Failed to load items: ${err.message}`);
+    setNotice(message, `Search items error: ${err.message}`, true);
+  }
+}
+
+function renderSearchItems(rows, emptyMessage = "No search items found.") {
+  const body = $("#search-items-body");
+  body.textContent = "";
+  if (!rows || !rows.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="7">${emptyMessage}</td>`;
+    body.appendChild(tr);
+    return;
+  }
+  rows.forEach((row) => {
+    const tr = document.createElement("tr");
+    const target = formatSearchTarget(row);
+    tr.innerHTML = `
+      <td>${row.id || ""}</td>
+      <td>${row.position ?? ""}</td>
+      <td>${target}</td>
+      <td>${row.status || ""}</td>
+      <td>${row.chosen_source || ""}</td>
+      <td>${formatScore(row.chosen_score)}</td>
+      <td>
+        <div class="action-group">
+          <button class="button ghost small" data-search-item-action="select-item" data-id="${row.id}">Select</button>
+        </div>
+      </td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function selectSearchItem(itemId) {
+  state.selectedSearchItem = itemId;
+  $("#search-selected-item").textContent = `Selected item: ${itemId}`;
+  refreshSearchCandidates();
+}
+
+async function refreshSearchCandidates() {
+  const message = $("#search-candidates-message");
+  const itemId = state.selectedSearchItem;
+  if (!itemId) {
+    renderSearchCandidates([], "Select an item to view candidates.");
+    return;
+  }
+  try {
+    const rows = await fetchJson(`/api/search/items/${encodeURIComponent(itemId)}/candidates`);
+    const key = JSON.stringify(rows);
+    if (key !== state.lastSearchCandidatesKey) {
+      state.lastSearchCandidatesKey = key;
+      renderSearchCandidates(rows);
+    }
+    state.searchCandidates = rows;
+    setNotice(message, "", false);
+  } catch (err) {
+    renderSearchCandidates([], `Failed to load candidates: ${err.message}`);
+    setNotice(message, `Search candidates error: ${err.message}`, true);
+  }
+}
+
+function renderSearchCandidates(rows, emptyMessage = "No candidates found.") {
+  const body = $("#search-candidates-body");
+  body.textContent = "";
+  if (!rows || !rows.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="12">${emptyMessage}</td>`;
+    body.appendChild(tr);
+    return;
+  }
+  rows.forEach((row) => {
+    const tr = document.createElement("tr");
+    const detected = formatDetectedCandidate(row);
+    const duration = formatDuration(row.duration_sec);
+    tr.innerHTML = `
+      <td>${row.source || ""}</td>
+      <td>${row.title || ""}</td>
+      <td>${detected}</td>
+      <td>${duration}</td>
+      <td>${formatScore(row.score_artist)}</td>
+      <td>${formatScore(row.score_track)}</td>
+      <td>${formatScore(row.score_album)}</td>
+      <td>${formatScore(row.score_duration)}</td>
+      <td>${formatScore(row.source_modifier)}</td>
+      <td>${formatScore(row.penalty_multiplier)}</td>
+      <td>${formatScore(row.final_score)}</td>
+      <td>${row.rank ?? ""}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+async function refreshDownloadJobs() {
+  const message = $("#download-jobs-message");
+  try {
+    const rows = await fetchJson("/api/download-jobs?limit=200");
+    const key = JSON.stringify(rows);
+    if (key !== state.lastDownloadJobsKey) {
+      state.lastDownloadJobsKey = key;
+      renderDownloadJobs(rows);
+    }
+    setNotice(message, "", false);
+  } catch (err) {
+    renderDownloadJobs([]);
+    setNotice(message, `Download queue error: ${err.message}`, true);
+  }
+}
+
+function renderDownloadJobs(rows) {
+  const body = $("#download-jobs-body");
+  body.textContent = "";
+  if (!rows || !rows.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="8">No download jobs found.</td>`;
+    body.appendChild(tr);
+    return;
+  }
+  rows.forEach((row) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${row.id || ""}</td>
+      <td>${row.origin || ""}</td>
+      <td>${row.source || ""}</td>
+      <td>${row.media_intent || ""}</td>
+      <td>${row.status || ""}</td>
+      <td>${row.attempts ?? 0}</td>
+      <td>${formatTimestamp(row.created_at) || ""}</td>
+      <td>${row.last_error || ""}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
 async function cleanupTemp() {
   const ok = window.confirm("Clear temporary files? This does not affect completed downloads.");
   if (!ok) {
@@ -1445,6 +1788,8 @@ function bindEvents() {
     await refreshLogs();
     await refreshHistory();
     await refreshDownloads();
+    await refreshSearchRequests();
+    await refreshDownloadJobs();
   });
 
   $("#logs-refresh").addEventListener("click", refreshLogs);
@@ -1475,6 +1820,58 @@ function bindEvents() {
   $("#downloads-body").addEventListener("click", async (event) => {
     await handleCopy(event, $("#downloads-message"));
   });
+  const searchCreate = $("#search-create");
+  if (searchCreate) {
+    searchCreate.addEventListener("click", createSearchRequest);
+  }
+  const searchRequestsRefresh = $("#search-requests-refresh");
+  if (searchRequestsRefresh) {
+    searchRequestsRefresh.addEventListener("click", refreshSearchRequests);
+  }
+  const searchItemsRefresh = $("#search-items-refresh");
+  if (searchItemsRefresh) {
+    searchItemsRefresh.addEventListener("click", refreshSearchItems);
+  }
+  const searchCandidatesRefresh = $("#search-candidates-refresh");
+  if (searchCandidatesRefresh) {
+    searchCandidatesRefresh.addEventListener("click", refreshSearchCandidates);
+  }
+  const downloadJobsRefresh = $("#download-jobs-refresh");
+  if (downloadJobsRefresh) {
+    downloadJobsRefresh.addEventListener("click", refreshDownloadJobs);
+  }
+  const searchRequestsBody = $("#search-requests-body");
+  if (searchRequestsBody) {
+    searchRequestsBody.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-search-action]");
+      if (!button) return;
+      const action = button.dataset.searchAction;
+      const requestId = button.dataset.id;
+      if (action === "select-request" && requestId) {
+        selectSearchRequest(requestId);
+        return;
+      }
+      if (action === "run-resolution") {
+        await runSearchResolution();
+        return;
+      }
+      if (action === "cancel-request" && requestId) {
+        await cancelSearchRequest(requestId);
+      }
+    });
+  }
+  const searchItemsBody = $("#search-items-body");
+  if (searchItemsBody) {
+    searchItemsBody.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-search-item-action]");
+      if (!button) return;
+      const action = button.dataset.searchItemAction;
+      const itemId = button.dataset.id;
+      if (action === "select-item" && itemId) {
+        selectSearchItem(itemId);
+      }
+    });
+  }
   $("#schedule-save").addEventListener("click", saveSchedule);
   $("#schedule-run-now").addEventListener("click", runScheduleNow);
   $("#save-config").addEventListener("click", saveConfig);

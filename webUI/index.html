@@ -26,6 +26,7 @@
       <button class="button ghost small nav-button" data-page="home" type="button">Home</button>
       <button class="button ghost small nav-button" data-page="config" type="button">Config</button>
       <button class="button ghost small nav-button" data-page="downloads" type="button">Downloads</button>
+      <button class="button ghost small nav-button" data-page="search" type="button">Search</button>
       <button class="button ghost small nav-button" data-page="history" type="button">History</button>
       <button class="button ghost small nav-button" data-page="logs" type="button">Logs</button>
       <div id="nav-actions" class="nav-actions"></div>
@@ -392,6 +393,182 @@
           </thead>
           <tbody id="downloads-body"></tbody>
         </table>
+      </div>
+    </section>
+
+    <section class="panel full page-full" id="search-panel" data-page="search">
+      <div class="panel-title">Media Search Console</div>
+      <div class="stack">
+        <div class="group">
+          <div class="group-title">Create Search Request</div>
+          <div class="grid two">
+            <label class="field">
+              <span>Artist</span>
+              <input id="search-artist" type="text" placeholder="Artist name">
+            </label>
+            <label class="field">
+              <span>Album (optional)</span>
+              <input id="search-album" type="text" placeholder="Album title">
+            </label>
+            <label class="field">
+              <span>Track (optional)</span>
+              <input id="search-track" type="text" placeholder="Track title">
+            </label>
+            <label class="field">
+              <span>Intent</span>
+              <select id="search-intent">
+                <option value="track">track</option>
+                <option value="album">album</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Minimum match score</span>
+              <input id="search-min-score" type="number" min="0" max="1" step="0.01" value="0.92">
+            </label>
+            <label class="field">
+              <span>Source priority</span>
+              <input id="search-source-priority" type="text" value="bandcamp,youtube_music,soundcloud">
+            </label>
+            <label class="field">
+              <span>Duration hint (sec, optional)</span>
+              <input id="search-duration-hint" type="number" min="0" step="1">
+            </label>
+            <label class="field">
+              <span>Quality min bitrate (kbps, optional)</span>
+              <input id="search-quality-min" type="number" min="0" step="1">
+            </label>
+            <label class="field">
+              <span>Max candidates per source</span>
+              <input id="search-max-candidates" type="number" min="1" step="1" value="5">
+            </label>
+            <label class="field">
+              <span>Created by (optional)</span>
+              <input id="search-created-by" type="text" value="webui">
+            </label>
+          </div>
+          <div class="row">
+            <label class="field inline">
+              <span>Include albums</span>
+              <input id="search-include-albums" type="checkbox" checked>
+            </label>
+            <label class="field inline">
+              <span>Include singles</span>
+              <input id="search-include-singles" type="checkbox" checked>
+            </label>
+            <label class="field inline">
+              <span>Lossless only</span>
+              <input id="search-lossless-only" type="checkbox">
+            </label>
+          </div>
+          <div class="row">
+            <button id="search-create" class="button">Create Request</button>
+            <div id="search-create-message" class="notice" role="status"></div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Search Requests</div>
+          <div class="row">
+            <button id="search-requests-refresh" class="button ghost">Refresh</button>
+            <div id="search-requests-message" class="notice" role="status"></div>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Request ID</th>
+                  <th>Artist / Album / Track</th>
+                  <th>Intent</th>
+                  <th>Status</th>
+                  <th>Created</th>
+                  <th>Error</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="search-requests-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Search Items</div>
+          <div class="row">
+            <span class="meta" id="search-selected-request">Selected request: -</span>
+            <button id="search-items-refresh" class="button ghost small">Refresh Items</button>
+            <div id="search-items-message" class="notice" role="status"></div>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Item ID</th>
+                  <th>Position</th>
+                  <th>Artist / Album / Track</th>
+                  <th>Status</th>
+                  <th>Chosen source</th>
+                  <th>Chosen score</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="search-items-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Candidates</div>
+          <div class="row">
+            <span class="meta" id="search-selected-item">Selected item: -</span>
+            <button id="search-candidates-refresh" class="button ghost small">Refresh Candidates</button>
+            <div id="search-candidates-message" class="notice" role="status"></div>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Title</th>
+                  <th>Detected artist / album / track</th>
+                  <th>Duration</th>
+                  <th>Artist score</th>
+                  <th>Track score</th>
+                  <th>Album score</th>
+                  <th>Duration score</th>
+                  <th>Source mod</th>
+                  <th>Penalty</th>
+                  <th>Final score</th>
+                  <th>Rank</th>
+                </tr>
+              </thead>
+              <tbody id="search-candidates-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-title">Unified Download Queue</div>
+          <div class="row">
+            <button id="download-jobs-refresh" class="button ghost">Refresh</button>
+            <div id="download-jobs-message" class="notice" role="status"></div>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Job ID</th>
+                  <th>Origin</th>
+                  <th>Source</th>
+                  <th>Media intent</th>
+                  <th>Status</th>
+                  <th>Attempts</th>
+                  <th>Created</th>
+                  <th>Last error</th>
+                </tr>
+              </thead>
+              <tbody id="download-jobs-body"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </section>
 
