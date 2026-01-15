@@ -26,6 +26,7 @@ from googleapiclient.errors import HttpError
 from yt_dlp import YoutubeDL
 
 from engine.paths import EnginePaths, resolve_dir, TOKENS_DIR
+from metadata.queue import enqueue_metadata
 
 MAX_VIDEO_RETRIES = 6        # Hard cap per video
 EXTRACTOR_RETRIES = 2        # Times to retry each extractor before moving on
@@ -42,6 +43,15 @@ _FORMAT_WEBM = (
 )
 _FORMAT_MUSIC_VIDEO = "bestvideo*+bestaudio/best"
 _AUDIO_FORMATS = {"mp3", "m4a", "aac", "opus", "flac"}
+_MUSIC_TITLE_CLEAN_RE = re.compile(
+    r"\s*[\(\[\{][^)\]\}]*?(official|music video|video|lyric|audio|visualizer|full video|hd|4k)[^)\]\}]*?[\)\]\}]\s*",
+    re.IGNORECASE,
+)
+_MUSIC_TITLE_TRAIL_RE = re.compile(
+    r"\s*-\s*(official|music video|video|lyric|audio|visualizer|full video).*$",
+    re.IGNORECASE,
+)
+_MUSIC_ARTIST_VEVO_RE = re.compile(r"(vevo)$", re.IGNORECASE)
 _YTDLP_DOWNLOAD_ALLOWLIST = {
     "concurrent_fragment_downloads",
     "cookiefile",
@@ -144,6 +154,15 @@ def _reset_video_progress(status):
     _status_set(status, "video_total_bytes", None)
     _status_set(status, "video_speed", None)
     _status_set(status, "video_eta", None)
+
+
+def _enqueue_music_metadata(file_path, meta, config, *, music_mode):
+    if not music_mode:
+        return
+    try:
+        enqueue_metadata(file_path, meta, config)
+    except Exception:
+        logging.exception("Music metadata enqueue failed for %s", file_path)
 
 
 _CLIENT_DELIVERIES = {}
@@ -349,6 +368,38 @@ def validate_config(config):
     music_metadata_debug = config.get("music_metadata_debug")
     if music_metadata_debug is not None and not isinstance(music_metadata_debug, bool):
         errors.append("music_metadata_debug must be true/false")
+    music_metadata = config.get("music_metadata")
+    if music_metadata is not None:
+        if not isinstance(music_metadata, dict):
+            errors.append("music_metadata must be an object")
+        else:
+            enabled = music_metadata.get("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                errors.append("music_metadata.enabled must be true/false")
+            threshold = music_metadata.get("confidence_threshold")
+            if threshold is not None and not isinstance(threshold, int):
+                errors.append("music_metadata.confidence_threshold must be an integer")
+            use_acoustid = music_metadata.get("use_acoustid")
+            if use_acoustid is not None and not isinstance(use_acoustid, bool):
+                errors.append("music_metadata.use_acoustid must be true/false")
+            acoustid_api_key = music_metadata.get("acoustid_api_key")
+            if acoustid_api_key is not None and not isinstance(acoustid_api_key, str):
+                errors.append("music_metadata.acoustid_api_key must be a string")
+            embed_artwork = music_metadata.get("embed_artwork")
+            if embed_artwork is not None and not isinstance(embed_artwork, bool):
+                errors.append("music_metadata.embed_artwork must be true/false")
+            allow_overwrite = music_metadata.get("allow_overwrite_tags")
+            if allow_overwrite is not None and not isinstance(allow_overwrite, bool):
+                errors.append("music_metadata.allow_overwrite_tags must be true/false")
+            max_artwork = music_metadata.get("max_artwork_size_px")
+            if max_artwork is not None and not isinstance(max_artwork, int):
+                errors.append("music_metadata.max_artwork_size_px must be an integer")
+            rate_limit = music_metadata.get("rate_limit_seconds")
+            if rate_limit is not None and not isinstance(rate_limit, (int, float)):
+                errors.append("music_metadata.rate_limit_seconds must be a number")
+            dry_run = music_metadata.get("dry_run")
+            if dry_run is not None and not isinstance(dry_run, bool):
+                errors.append("music_metadata.dry_run must be true/false")
     dry_run = config.get("dry_run")
     if dry_run is not None and not isinstance(dry_run, bool):
         errors.append("dry_run must be true/false")
@@ -841,9 +892,9 @@ def format_track_number(value):
 
 
 def build_music_filename(meta, ext, template=None, fallback_id=None):
-    artist = sanitize_for_filesystem(meta.get("artist") or "")
-    album = sanitize_for_filesystem(meta.get("album") or "")
-    track = sanitize_for_filesystem(meta.get("track") or meta.get("title") or "")
+    artist = sanitize_for_filesystem(_clean_music_artist(meta.get("artist") or ""))
+    album = sanitize_for_filesystem(_clean_music_title(meta.get("album") or ""))
+    track = sanitize_for_filesystem(_clean_music_title(meta.get("track") or meta.get("title") or ""))
     track_number = format_track_number(meta.get("track_number"))
     album_artist = sanitize_for_filesystem(meta.get("album_artist") or "")
     disc = normalize_track_number(meta.get("disc"))
@@ -877,6 +928,24 @@ def build_music_filename(meta, ext, template=None, fallback_id=None):
     if artist:
         return os.path.join(artist, filename)
     return filename
+
+
+def _clean_music_title(value):
+    if not value:
+        return ""
+    cleaned = _MUSIC_TITLE_CLEAN_RE.sub(" ", value)
+    cleaned = _MUSIC_TITLE_TRAIL_RE.sub("", cleaned)
+    return " ".join(cleaned.split())
+
+
+def _clean_music_artist(value):
+    if not value:
+        return ""
+    cleaned = value.strip()
+    if cleaned.startswith("@"):
+        cleaned = cleaned.lstrip("@").strip()
+    cleaned = _MUSIC_ARTIST_VEVO_RE.sub("", cleaned).strip()
+    return cleaned
 
 
 def build_output_filename(meta, video_id, ext, config, music_mode):
@@ -2476,10 +2545,14 @@ def run_single_download(config, video_url, destination=None, final_format_overri
         delivery_dir = os.path.join(paths.temp_downloads_dir, "client_delivery")
         os.makedirs(delivery_dir, exist_ok=True)
         final_path = os.path.join(delivery_dir, cleaned_name)
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
         os.replace(local_file, final_path)
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-        delivery_id, expires_at, _delivery_event = _register_client_delivery(final_path, cleaned_name)
+        delivery_id, expires_at, _delivery_event = _register_client_delivery(
+            final_path,
+            os.path.basename(cleaned_name),
+        )
         logging.info("Client delivery registered: token=%s", delivery_id)
         _status_set(status, "client_delivery_id", delivery_id)
         _status_set(status, "client_delivery_filename", cleaned_name)
@@ -2496,6 +2569,7 @@ def run_single_download(config, video_url, destination=None, final_format_overri
         _status_set(status, "current_video_title", None)
         _status_set(status, "current_phase", "ready for client download")
         logging.info("Returning control to API for client download")
+        _enqueue_music_metadata(final_path, meta, config, music_mode=music_mode)
         telegram_notify(config, "✅ Download completed → ready for client download")
         return True
 
@@ -2521,6 +2595,7 @@ def run_single_download(config, video_url, destination=None, final_format_overri
     _status_set(status, "current_video_id", None)
     _status_set(status, "current_video_title", None)
     _status_set(status, "current_phase", None)
+    _enqueue_music_metadata(final_path, meta, config, music_mode=music_mode)
     telegram_notify(config, "✅ Download completed → saved to server library")
     return True
 
@@ -2825,7 +2900,8 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
             def after_copy(success, dst, video_id=vid, playlist=playlist_id,
                            entry_id=entry.get("playlistItemId"),
                            temp=temp_dir, remove=remove_after, yt_service=yt,
-                           db_path=paths.db_path, subscribe=subscribe_mode):
+                           db_path=paths.db_path, subscribe=subscribe_mode,
+                           meta=meta, cfg=config, music=playlist_music):
 
                 if success:
                     logging.info("Copy OK → %s", dst)
@@ -2833,6 +2909,7 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
                     _status_set(status, "last_completed", cleaned_name)
                     _status_set(status, "last_completed_at", datetime.utcnow().isoformat())
                     _status_set(status, "last_completed_path", dst)
+                    _enqueue_music_metadata(dst, meta, cfg, music_mode=music)
                     try:
                         with sqlite3.connect(db_path, check_same_thread=False) as c:
                             c.execute(

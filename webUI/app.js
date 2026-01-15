@@ -1233,6 +1233,43 @@ function renderConfig(cfg) {
   $("#cfg-single-download-folder").value = normalizeDownloadsRelative(cfg.single_download_folder ?? "");
   $("#cfg-music-template").value = cfg.music_filename_template ?? "";
   $("#cfg-yt-dlp-cookies").value = cfg.yt_dlp_cookies ?? "";
+  const musicMetaDefaults = {
+    enabled: true,
+    confidence_threshold: 70,
+    use_acoustid: false,
+    acoustid_api_key: "",
+    embed_artwork: true,
+    allow_overwrite_tags: true,
+    max_artwork_size_px: 1500,
+    rate_limit_seconds: 1.5,
+    dry_run: false,
+  };
+  const musicMeta = cfg.music_metadata || {};
+  $("#cfg-music-meta-enabled").checked = typeof musicMeta.enabled === "boolean"
+    ? musicMeta.enabled
+    : musicMetaDefaults.enabled;
+  $("#cfg-music-meta-threshold").value = Number.isFinite(musicMeta.confidence_threshold)
+    ? musicMeta.confidence_threshold
+    : musicMetaDefaults.confidence_threshold;
+  $("#cfg-music-meta-acoustid").checked = typeof musicMeta.use_acoustid === "boolean"
+    ? musicMeta.use_acoustid
+    : musicMetaDefaults.use_acoustid;
+  $("#cfg-music-meta-acoustid-key").value = musicMeta.acoustid_api_key ?? "";
+  $("#cfg-music-meta-artwork").checked = typeof musicMeta.embed_artwork === "boolean"
+    ? musicMeta.embed_artwork
+    : musicMetaDefaults.embed_artwork;
+  $("#cfg-music-meta-overwrite").checked = typeof musicMeta.allow_overwrite_tags === "boolean"
+    ? musicMeta.allow_overwrite_tags
+    : musicMetaDefaults.allow_overwrite_tags;
+  $("#cfg-music-meta-artwork-size").value = Number.isFinite(musicMeta.max_artwork_size_px)
+    ? musicMeta.max_artwork_size_px
+    : musicMetaDefaults.max_artwork_size_px;
+  $("#cfg-music-meta-rate").value = Number.isFinite(musicMeta.rate_limit_seconds)
+    ? musicMeta.rate_limit_seconds
+    : musicMetaDefaults.rate_limit_seconds;
+  $("#cfg-music-meta-dry-run").checked = typeof musicMeta.dry_run === "boolean"
+    ? musicMeta.dry_run
+    : musicMetaDefaults.dry_run;
   const watcher = cfg.watcher || {};
   const watcherEnabled = typeof watcher.enabled === "boolean" ? watcher.enabled : true;
   const watcherToggle = $("#cfg-watcher-enabled");
@@ -1349,6 +1386,32 @@ function buildConfigFromForm() {
   } else {
     delete base.yt_dlp_cookies;
   }
+
+  const metaDefaults = {
+    enabled: true,
+    confidence_threshold: 70,
+    use_acoustid: false,
+    acoustid_api_key: "",
+    embed_artwork: true,
+    allow_overwrite_tags: true,
+    max_artwork_size_px: 1500,
+    rate_limit_seconds: 1.5,
+    dry_run: false,
+  };
+  const metaThreshold = parseInt($("#cfg-music-meta-threshold").value, 10);
+  const metaArtworkSize = parseInt($("#cfg-music-meta-artwork-size").value, 10);
+  const metaRate = parseFloat($("#cfg-music-meta-rate").value);
+  base.music_metadata = {
+    enabled: $("#cfg-music-meta-enabled").checked,
+    confidence_threshold: Number.isInteger(metaThreshold) ? metaThreshold : metaDefaults.confidence_threshold,
+    use_acoustid: $("#cfg-music-meta-acoustid").checked,
+    acoustid_api_key: $("#cfg-music-meta-acoustid-key").value.trim(),
+    embed_artwork: $("#cfg-music-meta-artwork").checked,
+    allow_overwrite_tags: $("#cfg-music-meta-overwrite").checked,
+    max_artwork_size_px: Number.isInteger(metaArtworkSize) ? metaArtworkSize : metaDefaults.max_artwork_size_px,
+    rate_limit_seconds: Number.isFinite(metaRate) ? metaRate : metaDefaults.rate_limit_seconds,
+    dry_run: $("#cfg-music-meta-dry-run").checked,
+  };
 
   const watcherEnabled = $("#cfg-watcher-enabled").checked;
   base.watcher = { enabled: watcherEnabled };

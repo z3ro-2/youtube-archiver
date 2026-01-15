@@ -6,7 +6,8 @@ Added:
 - Music mode (opt-in per playlist and per single-URL run) with audio-focused metadata and music-safe naming.
 - yt-dlp cookies support (Netscape cookies.txt) for improved YouTube Music metadata.
 - Music filename template support (artist/album/track hierarchy).
-- UI controls for music mode, cookies, and music template.
+- Music metadata enrichment pipeline (MusicBrainz + optional AcoustID + artwork) with background tagging.
+- UI controls for music mode, cookies, music template, and metadata enrichment options.
 - Config UI controls for watcher enable, backoff timing, and downtime window.
 - Per-playlist subscribe mode (only download new videos after first run).
 - Single-playlist run controls in the Web UI.
@@ -17,6 +18,7 @@ Added:
 
 Changed:
 - Metadata flow now prefers yt-dlp music fields when music mode is enabled.
+- Music metadata tagging can overwrite existing yt-dlp tags by default (configurable).
 - Music URLs (music.youtube.com) auto-enable music mode for single URL runs.
 - Music mode download URLs use music.youtube.com when enabled.
 - Music mode respects video formats (does not force audio when final_format is a video).

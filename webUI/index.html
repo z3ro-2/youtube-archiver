@@ -452,6 +452,49 @@
         </div>
 
         <div class="group">
+          <div class="group-title">Music metadata enrichment</div>
+          <div class="grid two">
+            <label class="field inline short">
+              <span>Enabled</span>
+              <input id="cfg-music-meta-enabled" type="checkbox">
+            </label>
+            <label class="field short">
+              <span>Confidence threshold</span>
+              <input id="cfg-music-meta-threshold" type="number" min="0" max="100" step="1">
+            </label>
+            <label class="field inline short">
+              <span>Use AcoustID</span>
+              <input id="cfg-music-meta-acoustid" type="checkbox">
+            </label>
+            <label class="field long">
+              <span>AcoustID API key</span>
+              <input id="cfg-music-meta-acoustid-key" type="password" placeholder="optional">
+            </label>
+            <label class="field inline short">
+              <span>Embed artwork</span>
+              <input id="cfg-music-meta-artwork" type="checkbox">
+            </label>
+            <label class="field inline short">
+              <span>Overwrite existing tags</span>
+              <input id="cfg-music-meta-overwrite" type="checkbox">
+            </label>
+            <label class="field short">
+              <span>Max artwork size (px)</span>
+              <input id="cfg-music-meta-artwork-size" type="number" min="200" step="50">
+            </label>
+            <label class="field short">
+              <span>Rate limit (seconds)</span>
+              <input id="cfg-music-meta-rate" type="number" min="0" step="0.1">
+            </label>
+            <label class="field inline short">
+              <span>Dry-run tagging</span>
+              <input id="cfg-music-meta-dry-run" type="checkbox">
+            </label>
+          </div>
+          <div class="notice">Applies only to music mode runs. Enrichment happens after downloads, in the background.</div>
+        </div>
+
+        <div class="group">
           <div class="group-title">Accounts</div>
           <div id="accounts-list" class="stack"></div>
           <button id="add-account" class="button ghost">Add account</button>

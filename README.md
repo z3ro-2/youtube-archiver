@@ -100,6 +100,26 @@ Notes:
 - Single-URL runs auto-enable music mode when the URL is `music.youtube.com`.
 - If `final_format` is a video format (webm/mp4/mkv), the download remains video even in music mode. Use an audio format (mp3/m4a/flac/opus) to force audio-only.
 
+## Music metadata enrichment (optional)
+When `music_mode` is enabled and `music_metadata.enabled` is true, the app enqueues the finalized file for background enrichment using MusicBrainz (optional AcoustID). This runs asynchronously and does not block downloads. Files are never renamed, and existing rich tags are not overwritten.
+
+Example config:
+```json
+"music_metadata": {
+  "enabled": true,
+  "confidence_threshold": 70,
+  "use_acoustid": false,
+  "acoustid_api_key": "",
+  "embed_artwork": true,
+  "allow_overwrite_tags": true,
+  "max_artwork_size_px": 1500,
+  "rate_limit_seconds": 1.5,
+  "dry_run": false
+}
+```
+
+Tagged files preserve YouTube traceability via custom tags (SOURCE, SOURCE_TITLE, MBID when matched). By default, enriched tags overwrite existing yt-dlp tags; set `allow_overwrite_tags` to false to keep original tags intact.
+
 ## Single-URL delivery modes
 Single-URL runs support an explicit delivery mode:
 - `server` (default): save into the server library (`single_download_folder`).
