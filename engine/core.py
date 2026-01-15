@@ -11,8 +11,8 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
-from threading import Thread
+from datetime import datetime, timedelta
+from uuid import uuid4
 
 import requests
 from google.oauth2.credentials import Credentials
@@ -21,22 +21,13 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from yt_dlp import YoutubeDL
 
-from engine.paths import EnginePaths, resolve_dir, TOKENS_DIR
-from engine.job_queue import DownloadJobStore, DownloadWorkerEngine, YouTubeAdapter, ensure_download_jobs_table
-from metadata.queue import enqueue_metadata
+from engine.paths import TOKENS_DIR, resolve_dir
+from engine.job_queue import DownloadJobStore, ensure_download_jobs_table
 
 MAX_VIDEO_RETRIES = 4        # Hard cap per video
 EXTRACTOR_RETRIES = 2        # Times to retry each extractor before moving on
 
 _GOOGLE_AUTH_RETRY = re.compile(r"Refreshing credentials due to a 401 response\\. Attempt (\\d+)/(\\d+)\\.")
-_FORMAT_WEBM = (
-    "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
-    "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
-    "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
-    "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
-    "bestvideo*+bestaudio/best"
-)
-_FORMAT_MUSIC_VIDEO = "bestvideo*+bestaudio/best"
 _AUDIO_FORMATS = {"mp3", "m4a", "aac", "opus", "flac"}
 _MUSIC_TITLE_CLEAN_RE = re.compile(
     r"\s*[\(\[\{][^)\]\}]*?(official|music video|video|lyric|audio|visualizer|full video|hd|4k)[^)\]\}]*?[\)\]\}]\s*",
@@ -48,27 +39,6 @@ _MUSIC_TITLE_TRAIL_RE = re.compile(
 )
 _MUSIC_ARTIST_VEVO_RE = re.compile(r"(vevo)$", re.IGNORECASE)
 _TEMPLATE_UNSET = object()
-_YTDLP_DOWNLOAD_ALLOWLIST = {
-    "concurrent_fragment_downloads",
-    "cookiefile",
-    "cookiesfrombrowser",
-    "forceipv4",
-    "forceipv6",
-    "fragment_retries",
-    "geo_verification_proxy",
-    "http_headers",
-    "max_sleep_interval",
-    "nocheckcertificate",
-    "noproxy",
-    "proxy",
-    "ratelimit",
-    "retries",
-    "sleep_interval",
-    "socket_timeout",
-    "source_address",
-    "throttledratelimit",
-    "user_agent",
-}
 
 
 def _install_google_auth_filter():
@@ -352,65 +322,26 @@ def init_db(db_path):
             filepath TEXT
         )
     """)
-    # playlist_videos supports subscribe mode by tracking what each playlist has already seen/downloaded.
-    # Invariants:
-    # - (playlist_id, video_id) is unique and must never be rewritten casually.
-    # - first_seen_at is the first time the playlist surfaced that video.
-    # - downloaded only flips to 1 after a successful file write.
-    # Do not drop/rename/repurpose this table without a migration.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS playlist_videos (
-            playlist_id TEXT NOT NULL,
-            video_id TEXT NOT NULL,
-            first_seen_at TIMESTAMP,
-            downloaded INTEGER DEFAULT 0,
-            PRIMARY KEY (playlist_id, video_id)
-        )
-    """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_videos_playlist ON playlist_videos (playlist_id)")
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS playlist_watch (
-            playlist_id TEXT PRIMARY KEY,
-            last_check TIMESTAMP,
-            next_check TIMESTAMP,
-            idle_count INTEGER DEFAULT 0
-        )
-    """)
-    cur.execute("PRAGMA table_info(playlist_watch)")
-    existing_cols = {row[1] for row in cur.fetchall()}
-    if "last_checked_at" not in existing_cols:
-        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_checked_at TIMESTAMP")
-    if "next_poll_at" not in existing_cols:
-        cur.execute("ALTER TABLE playlist_watch ADD COLUMN next_poll_at TIMESTAMP")
-    if "current_interval_min" not in existing_cols:
-        cur.execute("ALTER TABLE playlist_watch ADD COLUMN current_interval_min INTEGER")
-    if "consecutive_no_change" not in existing_cols:
-        cur.execute("ALTER TABLE playlist_watch ADD COLUMN consecutive_no_change INTEGER")
-    if "last_change_at" not in existing_cols:
-        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_change_at TIMESTAMP")
-    if "skip_reason" not in existing_cols:
-        cur.execute("ALTER TABLE playlist_watch ADD COLUMN skip_reason TEXT")
-    if "last_error" not in existing_cols:
-        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_error TEXT")
-    if "last_error_at" not in existing_cols:
-        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_error_at TIMESTAMP")
-    if "last_check" in existing_cols and "last_checked_at" in existing_cols:
-        cur.execute(
-            "UPDATE playlist_watch "
-            "SET last_checked_at=COALESCE(last_checked_at, last_check) "
-            "WHERE last_checked_at IS NULL"
-        )
-    if "next_check" in existing_cols and "next_poll_at" in existing_cols:
-        cur.execute(
-            "UPDATE playlist_watch "
-            "SET next_poll_at=COALESCE(next_poll_at, next_check) "
-            "WHERE next_poll_at IS NULL"
-        )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_watch_next ON playlist_watch (next_check)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_watch_next_poll ON playlist_watch (next_poll_at)")
     ensure_download_jobs_table(conn)
     conn.commit()
     return conn
+
+
+# ------------------------------------------------------------------
+# Playlist helpers
+# ------------------------------------------------------------------
+
+def record_playlist_error(conn, playlist_id, error_message):
+    if not playlist_id or not error_message:
+        return
+    logging.error("Playlist %s error: %s", playlist_id, error_message)
+
+
+def mark_video_downloaded(conn, playlist_id, video_id):
+    if not playlist_id or not video_id:
+        return
+    # Subscribe-mode tracking removed; no-op for compatibility.
+    return
 
 
 # ------------------------------------------------------------------
@@ -455,10 +386,10 @@ def is_music_url(url):
         return False
 
 
-def build_download_url(video_id, *, music_mode=False, source_url=None):
+def build_download_url(video_id, *, audio_mode=False, source_url=None):
     vid = extract_video_id(source_url) if source_url else None
     vid = vid or video_id
-    if music_mode:
+    if audio_mode:
         return f"https://music.youtube.com/watch?v={vid}"
     if source_url and isinstance(source_url, str) and source_url.startswith("http"):
         return source_url
@@ -547,8 +478,8 @@ def _clean_music_artist(value):
     return cleaned
 
 
-def build_output_filename(meta, video_id, ext, config, music_mode, *, template_override=_TEMPLATE_UNSET):
-    if music_mode:
+def build_output_filename(meta, video_id, ext, config, audio_mode, *, template_override=_TEMPLATE_UNSET):
+    if audio_mode:
         template = template_override if template_override is not _TEMPLATE_UNSET else (
             config.get("music_filename_template") if config else None
         )
@@ -606,15 +537,17 @@ def youtube_service(creds):
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
 
 
-def build_youtube_clients(accounts, config):
+def build_youtube_clients(accounts, config, *, cache=None, refresh_log_state=None):
     """
     Build one YouTube API client per configured account for this run.
     Any account that fails auth is skipped (logged) to avoid aborting the run.
     """
-    clients = {}
+    clients = cache if isinstance(cache, dict) else {}
     if not isinstance(accounts, dict):
         return clients
     for name, acc in accounts.items():
+        if name in clients and clients.get(name):
+            continue
         token_path = acc.get("token")
         if not token_path:
             logging.error("Account %s has no 'token' path configured; skipping", name)
@@ -762,7 +695,7 @@ def get_playlist_videos_fallback(playlist_id):
         return [], True
 
 
-def get_video_metadata_fallback(video_id_or_url):
+def get_video_metadata_fallback(video_id_or_url, *, cookie_file=None):
     """Metadata without OAuth using yt-dlp (no download)."""
     if video_id_or_url.startswith("http"):
         video_url = video_id_or_url
@@ -776,6 +709,8 @@ def get_video_metadata_fallback(video_id_or_url):
         "skip_download": True,
         "forceipv4": True,
     }
+    if cookie_file and os.path.exists(cookie_file):
+        opts["cookiefile"] = cookie_file
 
     try:
         with YoutubeDL(opts) as ydl:
@@ -803,7 +738,7 @@ def get_video_metadata_fallback(video_id_or_url):
     }
 
 
-def resolve_video_metadata(yt_client, video_id, allow_public_fallback=True):
+def resolve_video_metadata(yt_client, video_id, allow_public_fallback=True, *, audio_mode=False, cookie_file=None):
     """Try OAuth API first, then yt-dlp fallback (if allowed), then stub metadata."""
     meta = None
     if yt_client:
@@ -814,11 +749,15 @@ def resolve_video_metadata(yt_client, video_id, allow_public_fallback=True):
         except RefreshError as e:
             logging.error("OAuth refresh failed while fetching video %s: %s", video_id, e)
     if not meta and allow_public_fallback:
-        meta = get_video_metadata_fallback(video_id)
+        meta = get_video_metadata_fallback(video_id, cookie_file=cookie_file)
 
     if not meta:
         vid = extract_video_id(video_id) or video_id
-        base_url = video_id if isinstance(video_id, str) and str(video_id).startswith("http") else f"https://www.youtube.com/watch?v={vid}"
+        base_url = (
+            video_id
+            if isinstance(video_id, str) and str(video_id).startswith("http")
+            else build_download_url(vid, audio_mode=audio_mode)
+        )
         meta = {
             "video_id": vid,
             "title": vid,
@@ -830,25 +769,6 @@ def resolve_video_metadata(yt_client, video_id, allow_public_fallback=True):
             "thumbnail_url": None,
         }
     return meta
-
-
-# ------------------------------------------------------------------
-# Async copy worker
-# ------------------------------------------------------------------
-
-def async_copy(src, dst, callback):
-    def run():
-        try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-            callback(True, dst)
-        except Exception as e:
-            logging.exception("Copy failed: %s", e)
-            callback(False, dst)
-
-    t = Thread(target=run, daemon=True)
-    t.start()
-    return t
 
 
 # ------------------------------------------------------------------
@@ -1004,11 +924,75 @@ def embed_metadata(local_file, meta, video_id, thumbs_dir):
 
 
 # ------------------------------------------------------------------
+# Client delivery + metadata queue
+# ------------------------------------------------------------------
+
+_CLIENT_DELIVERY_TTL_SECONDS = 900
+_CLIENT_DELIVERIES = {}
+_CLIENT_DELIVERY_LOCK = threading.Lock()
+
+
+def _purge_client_deliveries(now=None):
+    now = now or datetime.utcnow()
+    expired = []
+    for key, entry in _CLIENT_DELIVERIES.items():
+        if entry["expires_at"] <= now:
+            expired.append(key)
+    for key in expired:
+        _CLIENT_DELIVERIES.pop(key, None)
+
+
+def _register_client_delivery(file_path, filename, *, ttl_seconds=_CLIENT_DELIVERY_TTL_SECONDS):
+    delivery_id = uuid4().hex
+    expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+    event = threading.Event()
+    with _CLIENT_DELIVERY_LOCK:
+        _purge_client_deliveries()
+        _CLIENT_DELIVERIES[delivery_id] = {
+            "path": file_path,
+            "filename": filename,
+            "expires_at": expires_at,
+            "event": event,
+        }
+    return delivery_id, expires_at, event
+
+
+def _enqueue_music_metadata(file_path, meta, config, *, audio_mode=False):
+    cfg = (config or {}).get("music_metadata")
+    if not isinstance(cfg, dict) or not cfg.get("enabled"):
+        return False
+    try:
+        from metadata.queue import enqueue_metadata
+    except Exception as exc:
+        logging.warning("Metadata queue unavailable: %s", exc)
+        return False
+    try:
+        enqueue_metadata(file_path, meta, config)
+        return True
+    except Exception:
+        logging.exception("Failed to enqueue metadata for %s", file_path)
+        return False
+
+
+# ------------------------------------------------------------------
 # yt-dlp (WEBM + MP4 fallback)
 # ------------------------------------------------------------------
 
-def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=None,
-                        target_format=None, audio_only=False, *, paths, status=None, stop_event=None):
+def download_with_ytdlp(
+    video_url,
+    temp_dir,
+    js_runtime=None,
+    meta=None,
+    config=None,
+    target_format=None,
+    audio_only=False,
+    *,
+    paths,
+    status=None,
+    stop_event=None,
+    audio_mode=False,
+    cookie_file=None,
+):
     vid = extract_video_id(video_url) or (video_url.split("v=")[-1] if "v=" in video_url else "video")
     if meta and meta.get("video_id"):
         vid = meta.get("video_id")
@@ -1158,6 +1142,9 @@ def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=
                         "preferredquality": "0",
                     }]
 
+                if cookie_file and os.path.exists(cookie_file):
+                    opts["cookiefile"] = cookie_file
+
                 if js_runtime:
                     runtime_name, runtime_path = js_runtime.split(":", 1)
                     opts["js_runtimes"] = {runtime_name: {"path": runtime_path}}
@@ -1229,21 +1216,23 @@ def download_with_ytdlp(video_url, temp_dir, js_runtime=None, meta=None, config=
 # Main pipeline
 # ------------------------------------------------------------------
 
-def run_single_download(config, video_url, destination=None, final_format_override=None,
-                        *, paths, status=None, js_runtime_override=None, stop_event=None):
-    """Download a single URL (no OAuth required)."""
+def run_single_download(
+    config,
+    video_url,
+    destination=None,
+    final_format_override=None,
+    *,
+    paths,
+    status=None,
+    js_runtime_override=None,
+    stop_event=None,
+):
+    """Enqueue a single URL for download (no direct downloads)."""
     js_runtime = resolve_js_runtime(config, override=js_runtime_override)
-    meta = resolve_video_metadata(None, extract_video_id(video_url) or video_url)
-
-    vid = meta.get("video_id") or extract_video_id(video_url) or "video"
-    temp_dir = os.path.join(paths.temp_downloads_dir, vid)
-    cookies_path = resolve_cookiefile(config)
-    if music_mode and not cookies_path:
-        logging.warning("Music mode enabled without yt-dlp cookies; metadata quality may be degraded.")
     vid = extract_video_id(video_url) or "video"
 
     if stop_event and stop_event.is_set():
-        logging.warning("[%s] Stop requested before single download", vid)
+        logging.warning("[%s] Stop requested before enqueue", vid)
         return False
 
     _status_set(status, "current_playlist_id", None)
@@ -1254,8 +1243,8 @@ def run_single_download(config, video_url, destination=None, final_format_overri
     _status_set(status, "progress_percent", 0)
     _status_set(status, "last_completed_path", None)
     _reset_video_progress(status)
-    _status_set(status, "video_progress_percent", 0)
-    _status_set(status, "video_downloaded_bytes", 0)
+    _status_set(status, "current_phase", "queued")
+    _status_set(status, "last_error_message", None)
 
     try:
         dest_dir = resolve_dir(
@@ -1264,161 +1253,51 @@ def run_single_download(config, video_url, destination=None, final_format_overri
         )
     except ValueError as exc:
         logging.error("Invalid destination path: %s", exc)
-    _status_set(status, "current_phase", "queued")
-    _status_set(status, "last_error_message", None)
-
-    dest_dir = None
-    if delivery_mode == "server":
-        try:
-            dest_dir = resolve_dir(
-                destination or config.get("single_download_folder") or paths.single_downloads_dir,
-                paths.single_downloads_dir,
-            )
-        except ValueError as exc:
-            logging.error("Invalid destination path: %s", exc)
-            _status_set(status, "last_error_message", f"Invalid destination path: {exc}")
-            _status_set(status, "progress_current", 1)
-            _status_set(status, "progress_total", 1)
-            _status_set(status, "progress_percent", 100)
-            _reset_video_progress(status)
-            _status_set(status, "current_video_id", None)
-            _status_set(status, "current_video_title", None)
-            _status_set(status, "current_phase", None)
-            return False
-        if not dry_run:
-            os.makedirs(dest_dir, exist_ok=True)
-    else:
-        dest_dir = os.path.join(paths.temp_downloads_dir, "client_delivery")
-        if not dry_run:
-            os.makedirs(dest_dir, exist_ok=True)
-
-    if dry_run:
-        format_ctx = _resolve_download_format({
-            "music_mode": music_mode,
-            "final_format": final_format_override,
-            "audio_only": False,
-            "config": config,
-        })
-        target_fmt = format_ctx["target_fmt"]
-        ext = target_fmt or final_format_override or config.get("final_format") or (
-            "mp3" if format_ctx["audio_mode"] else "webm"
-        )
-        output_template = config.get("music_filename_template") if music_mode else config.get("filename_template")
-        cleaned_name = build_output_filename(
-            {"title": vid, "channel": "", "upload_date": ""},
-            vid,
-            ext,
-            config,
-            music_mode,
-            template_override=output_template,
-        )
-        final_path = os.path.join(dest_dir or paths.single_downloads_dir, cleaned_name)
-        logging.info("Dry-run: would download %s → %s", vid, final_path)
+        _status_set(status, "last_error_message", f"Invalid destination path: {exc}")
         _status_set(status, "progress_current", 1)
         _status_set(status, "progress_total", 1)
         _status_set(status, "progress_percent", 100)
         _reset_video_progress(status)
         _status_set(status, "current_video_id", None)
         _status_set(status, "current_video_title", None)
+        _status_set(status, "current_phase", None)
         return False
-    os.makedirs(dest_dir, exist_ok=True)
 
-    local_file = download_with_ytdlp(
-        video_url,
-        temp_dir,
-        js_runtime,
-        meta,
-        config,
-        target_format=final_format_override,
-    download_url = build_download_url(vid, music_mode=music_mode, source_url=video_url)
-    output_template = config.get("music_filename_template") if music_mode else config.get("filename_template")
+    target_format = (
+        final_format_override
+        or (config.get("final_format") if isinstance(config, dict) else "")
+        or ""
+    ).lower()
+    audio_only = target_format in _AUDIO_FORMATS if target_format else False
+    media_type = "audio" if audio_only else "video"
+    media_intent = "track" if audio_only else "episode"
+    source = "youtube_music" if is_music_url(video_url) else "youtube"
+    output_template = config.get("music_filename_template") if audio_only else config.get("filename_template")
+
     store = DownloadJobStore(paths.db_path)
-    job_id = store.enqueue(
+    store.enqueue(
         origin="search",
         origin_id=vid,
-        media_type="audio" if music_mode else "video",
-        media_intent="track" if music_mode else "episode",
-        source="youtube_music" if music_mode else "youtube",
-        url=download_url,
+        media_type=media_type,
+        media_intent=media_intent,
+        source=source,
+        url=build_download_url(vid, source_url=video_url),
         output_template=output_template,
         output_dir=dest_dir,
         context={
             "video_id": vid,
-            "delivery_mode": delivery_mode,
             "target_format": final_format_override,
-            "audio_only": False,
+            "audio_only": audio_only,
             "js_runtime": js_runtime,
-            "cookies_path": cookies_path,
         },
         max_attempts=config.get("job_max_attempts") if isinstance(config, dict) else None,
     )
-    _status_set(status, "progress_current", 0)
-    _status_set(status, "progress_total", 1)
-    _status_set(status, "progress_percent", 0)
-    _status_set(status, "current_phase", "queued")
 
-    worker = DownloadWorkerEngine(
-        paths.db_path,
-        paths=paths,
-        config=config,
-        status=status,
-        stop_event=stop_event,
-    )
-    if not local_file:
-        logging.error("Download FAILED: %s", video_url)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        _status_set(status, "progress_current", 1)
-        _status_set(status, "progress_total", 1)
-        _status_set(status, "progress_percent", 100)
-        _reset_video_progress(status)
-        _status_set(status, "current_video_id", None)
-        _status_set(status, "current_video_title", None)
-        return False
-
-    ext = os.path.splitext(local_file)[1].lstrip(".") or final_format_override or config.get("final_format") or "webm"
-
-    template = config.get("filename_template")
-    if template:
-        try:
-            cleaned_name = template % {
-                "title": sanitize_for_filesystem(meta.get("title") or vid),
-                "uploader": sanitize_for_filesystem(meta.get("channel") or ""),
-                "upload_date": meta.get("upload_date") or "",
-                "ext": ext
-            }
-        except Exception:
-            cleaned_name = f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}_{vid[:8]}.{ext}"
-    else:
-        cleaned_name = f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}_{vid[:8]}.{ext}"
-
-    final_path = os.path.join(dest_dir, cleaned_name)
-    os.makedirs(os.path.dirname(final_path), exist_ok=True)
-
-    shutil.copy2(local_file, final_path)
-    shutil.rmtree(temp_dir, ignore_errors=True)
-
-    logging.info("Direct download saved to %s", final_path)
-    _status_set(status, "last_completed", cleaned_name)
-    _status_set(status, "last_completed_at", datetime.utcnow().isoformat())
-    _status_set(status, "last_completed_path", final_path)
     _status_set(status, "progress_current", 1)
     _status_set(status, "progress_total", 1)
     _status_set(status, "progress_percent", 100)
-    _reset_video_progress(status)
-    _status_set(status, "current_video_id", None)
-    _status_set(status, "current_video_title", None)
+    _status_set(status, "current_phase", None)
     return True
-        adapters={
-            "youtube": YouTubeAdapter(),
-            "youtube_music": YouTubeAdapter(),
-        },
-    )
-    worker.run_until_idle()
-
-    job = store.get_job(job_id)
-    ok = bool(job and job.status == "completed")
-    status.single_download_ok = ok
-    return ok
 
 
 def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event=None):
@@ -1434,7 +1313,7 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
         return
 
     if os.path.exists(lock_file):
-        logging.warning("Lockfile present — skipping run")
+        logging.warning("Lockfile present - skipping run")
         return
 
     lock_dir = os.path.dirname(lock_file)
@@ -1450,11 +1329,7 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
     playlists = config.get("playlists", []) or []
     js_runtime = resolve_js_runtime(config, override=js_runtime_override)
     global_final_format = config.get("final_format")
-    preview_only = os.environ.get("YT_ARCHIVER_PREVIEW", "").strip().lower() in {"1", "true", "yes", "on"}
-    if dry_run:
-        logging.info("Dry-run enabled: no downloads or DB writes will occur")
 
-    jobs_enqueued = 0
     enqueued_urls = set()
     job_store = DownloadJobStore(paths.db_path)
     yt_clients = build_youtube_clients(accounts, config) if accounts else {}
@@ -1509,7 +1384,12 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
                     _status_append(status, "run_failures", f"{playlist_id} (auth)")
                     continue
                 except RefreshError as e:
-                    logging.error("OAuth refresh failed for account %s while fetching playlist %s: %s", account, playlist_id, e)
+                    logging.error(
+                        "OAuth refresh failed for account %s while fetching playlist %s: %s",
+                        account,
+                        playlist_id,
+                        e,
+                    )
                     _status_append(status, "run_failures", f"{playlist_id} (auth)")
                     yt_clients[account] = None
                     continue
@@ -1530,18 +1410,14 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
             _status_set(status, "progress_total", total_videos)
             _status_set(status, "progress_current", completed)
             _status_set(status, "progress_percent", 0)
-            format_ctx = _resolve_download_format({
-                "music_mode": playlist_music,
-                "final_format": playlist_format,
-                "audio_only": False,
-                "config": config,
-            })
-            target_fmt = format_ctx["target_fmt"]
-            dry_run_ext = target_fmt or playlist_format or config.get("final_format") or (
-                "mp3" if format_ctx["audio_mode"] else "webm"
+
+            target_format = (playlist_format or global_final_format or "").lower()
+            audio_only = target_format in _AUDIO_FORMATS if target_format else False
+            media_type = "audio" if audio_only else "video"
+            source_name = "youtube"
+            output_template = (
+                config.get("music_filename_template") if audio_only else config.get("filename_template")
             )
-            output_template = config.get("music_filename_template") if playlist_music else config.get("filename_template")
-            source_name = "youtube_music" if playlist_music else "youtube"
 
             for entry in videos:
                 if stop_event and stop_event.is_set():
@@ -1559,38 +1435,12 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
 
                 cur.execute("SELECT video_id FROM downloads WHERE video_id=?", (vid,))
                 if cur.fetchone():
-                if subscribe_mode:
-                    if is_video_seen(conn, playlist_id, vid):
-                        # Optimization: stop after the first known video when in subscribe mode.
-                        label = playlist_name or playlist_id
-                        logging.info('Subscribe: "%s" reached seen video %s; stopping scan.', label, vid)
-                        break
-                else:
-                    cur.execute("SELECT video_id FROM downloads WHERE video_id=?", (vid,))
-                    if cur.fetchone():
-                        completed += 1
-                        _status_set(status, "progress_current", completed)
-                        _status_set(status, "progress_percent", int((completed / total_videos) * 100))
-                        continue
-
-                video_url = build_download_url(vid, music_mode=playlist_music, source_url=entry.get("url"))
-                if dry_run:
-                    cleaned_name = build_output_filename(
-                        {"title": vid, "channel": "", "upload_date": ""},
-                        vid,
-                        dry_run_ext,
-                        config,
-                        playlist_music,
-                        template_override=output_template,
-                    )
-                    final_path = os.path.join(target_folder, cleaned_name)
-                    logging.info("Dry-run: would enqueue %s → %s", vid, final_path)
                     completed += 1
                     _status_set(status, "progress_current", completed)
                     _status_set(status, "progress_percent", int((completed / total_videos) * 100))
-                    _status_set(status, "current_phase", None)
                     continue
 
+                video_url = build_download_url(vid, source_url=entry.get("url"))
                 if video_url in enqueued_urls or job_store.has_active_job(source_name, video_url):
                     logging.info("Skipping enqueue (already queued): %s", vid)
                     completed += 1
@@ -1598,103 +1448,10 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
                     _status_set(status, "progress_percent", int((completed / total_videos) * 100))
                     continue
 
-                meta = resolve_video_metadata(yt, vid, allow_public_fallback=allow_public)
-                _status_set(status, "current_video_title", meta.get("title") or vid)
-                _status_set(status, "video_progress_percent", 0)
-                _status_set(status, "video_downloaded_bytes", 0)
-
-                logging.info("START download: %s (%s)", vid, meta.get("title"))
-
-                video_url = meta.get("url") or f"https://www.youtube.com/watch?v={vid}"
-                temp_dir = os.path.join(paths.temp_downloads_dir, vid)
-
-                local_file = download_with_ytdlp(
-                    video_url,
-                    temp_dir,
-                    js_runtime,
-                    meta,
-                    config,
-                    target_format=playlist_format,
-                    paths=paths,
-                    status=status,
-                    stop_event=stop_event,
-                )
-                _reset_video_progress(status)
-                if not local_file:
-                    logging.warning("Download FAILED: %s", vid)
-                    _status_append(status, "run_failures", meta.get("title") or vid)
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    completed += 1
-                    _status_set(status, "progress_current", completed)
-                    _status_set(status, "progress_percent", int((completed / total_videos) * 100))
-                    continue
-
-                # Determine extension based on the resulting file or playlist/default format
-                ext = os.path.splitext(local_file)[1].lstrip(".") or playlist_format or "webm"
-
-                # Build filename using filename_template if present
-                template = config.get("filename_template")
-                if template:
-                    try:
-                        cleaned_name = template % {
-                            "title": sanitize_for_filesystem(meta.get("title") or vid),
-                            "uploader": sanitize_for_filesystem(meta.get("channel") or ""),
-                            "upload_date": meta.get("upload_date") or "",
-                            "ext": ext
-                        }
-                    except Exception:
-                        cleaned_name = f"{pretty_filename(meta['title'], meta['channel'], meta['upload_date'])}_{vid[:8]}.{ext}"
-                else:
-                    cleaned_name = f"{pretty_filename(meta['title'], meta['channel'], meta['upload_date'])}_{vid[:8]}.{ext}"
-
-                final_path = os.path.join(target_folder, cleaned_name)
-
-                def after_copy(success, dst, video_id=vid, playlist=playlist_id,
-                               entry_id=entry.get("playlistItemId"),
-                               temp=temp_dir, remove=remove_after, yt_service=yt,
-                               db_path=paths.db_path):
-
-                    if success:
-                        logging.info("Copy OK → %s", dst)
-                        _status_append(status, "run_successes", cleaned_name)
-                        _status_set(status, "last_completed", cleaned_name)
-                        _status_set(status, "last_completed_at", datetime.utcnow().isoformat())
-                        _status_set(status, "last_completed_path", dst)
-                        try:
-                            with sqlite3.connect(db_path, check_same_thread=False) as c:
-                                c.execute(
-                                    "INSERT INTO downloads (video_id, playlist_id, downloaded_at, filepath)"
-                                    " VALUES (?, ?, ?, ?)",
-                                    (video_id, playlist, datetime.utcnow(), dst)
-                                )
-                                c.commit()
-                        except Exception:
-                            logging.exception("DB insert failed for %s", video_id)
-                    else:
-                        logging.error("Copy FAILED for %s", video_id)
-                        _status_append(status, "run_failures", cleaned_name)
-
-                    shutil.rmtree(temp, ignore_errors=True)
-
-                    if success and remove and entry_id and yt_service:
-                        try:
-                            yt_service.playlistItems().delete(id=entry_id).execute()
-                        except Exception:
-                            logging.exception("Failed removing %s", video_id)
-
-                t = async_copy(local_file, final_path, after_copy)
-                pending_copies.append(t)
-                logging.info("COPY started in background → next download begins")
-                completed += 1
-                _status_set(status, "progress_current", completed)
-                _status_set(status, "progress_percent", int((completed / total_videos) * 100))
-
-        for t in pending_copies:
-            t.join()
                 job_store.enqueue(
                     origin="playlist",
                     origin_id=playlist_id,
-                    media_type="audio" if playlist_music else "video",
+                    media_type=media_type,
                     media_intent="playlist",
                     source=source_name,
                     url=video_url,
@@ -1704,39 +1461,18 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
                         "video_id": vid,
                         "playlist_item_id": entry.get("playlistItemId"),
                         "remove_after_download": remove_after,
-                        "subscribe_mode": subscribe_mode,
                         "account": account,
                         "target_format": playlist_format,
-                        "audio_only": False,
+                        "audio_only": audio_only,
                         "js_runtime": js_runtime,
-                        "cookies_path": cookies_path,
-                        "delivery_mode": "server",
                     },
                     max_attempts=config.get("job_max_attempts") if isinstance(config, dict) else None,
                 )
                 enqueued_urls.add(video_url)
-                jobs_enqueued += 1
                 _status_set(status, "current_phase", "queued")
                 completed += 1
                 _status_set(status, "progress_current", completed)
                 _status_set(status, "progress_percent", int((completed / total_videos) * 100))
-
-        if jobs_enqueued and not dry_run:
-            _status_set(status, "progress_current", 0)
-            _status_set(status, "progress_total", jobs_enqueued)
-            _status_set(status, "progress_percent", 0)
-            worker = DownloadWorkerEngine(
-                paths.db_path,
-                paths=paths,
-                config=config,
-                status=status,
-                stop_event=stop_event,
-                adapters={
-                    "youtube": YouTubeAdapter(),
-                    "youtube_music": YouTubeAdapter(),
-                },
-            )
-            worker.run_until_idle()
 
         logging.info("\n" + ("-" * 80) + "\n")
         logging.info("Run complete.")
