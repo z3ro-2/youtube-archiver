@@ -52,6 +52,7 @@ from engine.paths import (
     resolve_dir,
 )
 from engine.runtime import get_runtime_info
+from engine.search_resolution import SearchResolutionService
 
 APP_NAME = "YouTube Archiver API"
 STATUS_SCHEMA_VERSION = 1
@@ -190,6 +191,10 @@ async def startup():
     app.state.ytdlp_update_lock = threading.Lock()
     app.state.ytdlp_update_running = False
     app.state.scheduler = BackgroundScheduler(timezone="UTC")
+    app.state.search_service = SearchResolutionService(
+        search_db_path=app.state.paths.search_db_path,
+        download_db_path=app.state.paths.db_path,
+    )
     ensure_dir(DATA_DIR)
     ensure_dir(CONFIG_DIR)
     ensure_dir(LOG_DIR)
@@ -946,6 +951,49 @@ async def api_run(request: RunRequest):
     if not started:
         raise HTTPException(status_code=409, detail="Archive run already in progress")
     return {"run_id": app.state.run_id, "status": "started"}
+
+
+@app.post("/api/search/requests", status_code=201)
+async def api_create_search_request(payload: dict = Body(...)):
+    try:
+        request_id = app.state.search_service.create_search_request(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"request_id": request_id}
+
+
+@app.get("/api/search/requests/{request_id}")
+async def api_get_search_request(request_id: str):
+    data = app.state.search_service.get_search_request(request_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Search request not found")
+    return data
+
+
+@app.get("/api/search/requests")
+async def api_list_search_requests(
+    status: str | None = Query(None, max_length=20),
+    limit: int = Query(50, ge=1, le=200),
+):
+    try:
+        return app.state.search_service.list_search_requests(status=status, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/search/requests/{request_id}/cancel")
+async def api_cancel_search_request(request_id: str):
+    canceled = app.state.search_service.cancel_search_request(request_id)
+    if not canceled:
+        raise HTTPException(status_code=404, detail="Search request not found or already terminal")
+    return {"request_id": request_id, "status": "canceled"}
+
+
+@app.post("/api/search/run")
+async def api_search_run_once():
+    config = _read_config_for_scheduler() or {}
+    request_id = app.state.search_service.run_search_resolution_once(config=config)
+    return {"request_id": request_id}
 
 
 @app.get("/api/logs", response_class=PlainTextResponse)

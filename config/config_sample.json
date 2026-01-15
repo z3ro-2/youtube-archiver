@@ -24,6 +24,25 @@
   ],
   "yt_dlp_opts": {},
   "filename_template": "%(title)s - %(uploader)s - %(upload_date)s.%(ext)s",
+<<<<<<< Updated upstream
+=======
+  "music_filename_template": "%(artist)s/%(album)s/%(track_number)s - %(track)s.%(ext)s",
+  "music_metadata": {
+    "enabled": true,
+    "confidence_threshold": 70,
+    "use_acoustid": false,
+    "acoustid_api_key": "",
+    "embed_artwork": true,
+    "allow_overwrite_tags": true,
+    "max_artwork_size_px": 1500,
+    "rate_limit_seconds": 1.5,
+    "dry_run": false
+  },
+  "music_metadata_debug": false,
+  "job_max_attempts": 3,
+  "job_retry_delay_seconds": 30,
+  "dry_run": false,
+>>>>>>> Stashed changes
   "upload_date_format": "MM-YYYY",
   "final_format": "webm",
   "js_runtime": "node:/usr/bin/node",

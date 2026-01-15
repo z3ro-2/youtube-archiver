@@ -21,12 +21,61 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from yt_dlp import YoutubeDL
 
+<<<<<<< Updated upstream
 from engine.paths import EnginePaths, resolve_dir
+=======
+from engine.paths import EnginePaths, resolve_dir, TOKENS_DIR
+from engine.job_queue import DownloadJobStore, DownloadWorkerEngine, YouTubeAdapter, ensure_download_jobs_table
+from metadata.queue import enqueue_metadata
+>>>>>>> Stashed changes
 
 MAX_VIDEO_RETRIES = 4        # Hard cap per video
 EXTRACTOR_RETRIES = 2        # Times to retry each extractor before moving on
 
 _GOOGLE_AUTH_RETRY = re.compile(r"Refreshing credentials due to a 401 response\\. Attempt (\\d+)/(\\d+)\\.")
+<<<<<<< Updated upstream
+=======
+_FORMAT_WEBM = (
+    "bestvideo[ext=webm][height<=1080]+bestaudio[ext=webm]/"
+    "bestvideo[ext=webm][height<=720]+bestaudio[ext=webm]/"
+    "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
+    "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
+    "bestvideo*+bestaudio/best"
+)
+_FORMAT_MUSIC_VIDEO = "bestvideo*+bestaudio/best"
+_AUDIO_FORMATS = {"mp3", "m4a", "aac", "opus", "flac"}
+_MUSIC_TITLE_CLEAN_RE = re.compile(
+    r"\s*[\(\[\{][^)\]\}]*?(official|music video|video|lyric|audio|visualizer|full video|hd|4k)[^)\]\}]*?[\)\]\}]\s*",
+    re.IGNORECASE,
+)
+_MUSIC_TITLE_TRAIL_RE = re.compile(
+    r"\s*-\s*(official|music video|video|lyric|audio|visualizer|full video).*$",
+    re.IGNORECASE,
+)
+_MUSIC_ARTIST_VEVO_RE = re.compile(r"(vevo)$", re.IGNORECASE)
+_TEMPLATE_UNSET = object()
+_YTDLP_DOWNLOAD_ALLOWLIST = {
+    "concurrent_fragment_downloads",
+    "cookiefile",
+    "cookiesfrombrowser",
+    "forceipv4",
+    "forceipv6",
+    "fragment_retries",
+    "geo_verification_proxy",
+    "http_headers",
+    "max_sleep_interval",
+    "nocheckcertificate",
+    "noproxy",
+    "proxy",
+    "ratelimit",
+    "retries",
+    "sleep_interval",
+    "socket_timeout",
+    "source_address",
+    "throttledratelimit",
+    "user_agent",
+}
+>>>>>>> Stashed changes
 
 
 def _install_google_auth_filter():
@@ -310,6 +359,66 @@ def init_db(db_path):
             filepath TEXT
         )
     """)
+<<<<<<< Updated upstream
+=======
+    # playlist_videos supports subscribe mode by tracking what each playlist has already seen/downloaded.
+    # Invariants:
+    # - (playlist_id, video_id) is unique and must never be rewritten casually.
+    # - first_seen_at is the first time the playlist surfaced that video.
+    # - downloaded only flips to 1 after a successful file write.
+    # Do not drop/rename/repurpose this table without a migration.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS playlist_videos (
+            playlist_id TEXT NOT NULL,
+            video_id TEXT NOT NULL,
+            first_seen_at TIMESTAMP,
+            downloaded INTEGER DEFAULT 0,
+            PRIMARY KEY (playlist_id, video_id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_videos_playlist ON playlist_videos (playlist_id)")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS playlist_watch (
+            playlist_id TEXT PRIMARY KEY,
+            last_check TIMESTAMP,
+            next_check TIMESTAMP,
+            idle_count INTEGER DEFAULT 0
+        )
+    """)
+    cur.execute("PRAGMA table_info(playlist_watch)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    if "last_checked_at" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_checked_at TIMESTAMP")
+    if "next_poll_at" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN next_poll_at TIMESTAMP")
+    if "current_interval_min" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN current_interval_min INTEGER")
+    if "consecutive_no_change" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN consecutive_no_change INTEGER")
+    if "last_change_at" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_change_at TIMESTAMP")
+    if "skip_reason" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN skip_reason TEXT")
+    if "last_error" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_error TEXT")
+    if "last_error_at" not in existing_cols:
+        cur.execute("ALTER TABLE playlist_watch ADD COLUMN last_error_at TIMESTAMP")
+    if "last_check" in existing_cols and "last_checked_at" in existing_cols:
+        cur.execute(
+            "UPDATE playlist_watch "
+            "SET last_checked_at=COALESCE(last_checked_at, last_check) "
+            "WHERE last_checked_at IS NULL"
+        )
+    if "next_check" in existing_cols and "next_poll_at" in existing_cols:
+        cur.execute(
+            "UPDATE playlist_watch "
+            "SET next_poll_at=COALESCE(next_poll_at, next_check) "
+            "WHERE next_poll_at IS NULL"
+        )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_watch_next ON playlist_watch (next_check)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_playlist_watch_next_poll ON playlist_watch (next_poll_at)")
+    ensure_download_jobs_table(conn)
+>>>>>>> Stashed changes
     conn.commit()
     return conn
 
@@ -346,6 +455,149 @@ def pretty_filename(title, channel, upload_date):
         return f"{title_s} - {channel_s}"
 
 
+<<<<<<< Updated upstream
+=======
+def is_music_url(url):
+    if not url:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        return "music.youtube.com" in (parsed.netloc or "")
+    except Exception:
+        return False
+
+
+def build_download_url(video_id, *, music_mode=False, source_url=None):
+    vid = extract_video_id(source_url) if source_url else None
+    vid = vid or video_id
+    if music_mode:
+        return f"https://music.youtube.com/watch?v={vid}"
+    if source_url and isinstance(source_url, str) and source_url.startswith("http"):
+        return source_url
+    return f"https://www.youtube.com/watch?v={vid}"
+
+
+def _has_value(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def normalize_track_number(value):
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def format_track_number(value):
+    num = normalize_track_number(value)
+    if num is None:
+        return None
+    return f"{num:02d}"
+
+
+def build_music_filename(meta, ext, template=None, fallback_id=None):
+    artist = sanitize_for_filesystem(_clean_music_artist(meta.get("artist") or ""))
+    album = sanitize_for_filesystem(_clean_music_title(meta.get("album") or ""))
+    track = sanitize_for_filesystem(_clean_music_title(meta.get("track") or meta.get("title") or ""))
+    track_number = format_track_number(meta.get("track_number"))
+    album_artist = sanitize_for_filesystem(meta.get("album_artist") or "")
+    disc = normalize_track_number(meta.get("disc"))
+    release_date = sanitize_for_filesystem(meta.get("release_date") or "")
+
+    values = {
+        "artist": artist,
+        "album": album,
+        "track": track,
+        "track_number": track_number or "",
+        "album_artist": album_artist,
+        "disc": disc or "",
+        "release_date": release_date,
+        "ext": ext,
+    }
+
+    if template:
+        try:
+            rendered = template % values
+            return rendered.lstrip("/\\")
+        except Exception:
+            pass
+
+    # Default music-safe structure: Artist/Album/NN - Track.ext
+    filename = track or (fallback_id or "track")
+    if track_number:
+        filename = f"{track_number} - {filename}"
+    filename = f"{filename}.{ext}"
+    if artist and album:
+        return os.path.join(artist, album, filename)
+    if artist:
+        return os.path.join(artist, filename)
+    return filename
+
+
+def _clean_music_title(value):
+    if not value:
+        return ""
+    cleaned = _MUSIC_TITLE_CLEAN_RE.sub(" ", value)
+    cleaned = _MUSIC_TITLE_TRAIL_RE.sub("", cleaned)
+    return " ".join(cleaned.split())
+
+
+def _clean_music_artist(value):
+    if not value:
+        return ""
+    cleaned = value.strip()
+    if cleaned.startswith("@"):
+        cleaned = cleaned.lstrip("@").strip()
+    cleaned = _MUSIC_ARTIST_VEVO_RE.sub("", cleaned).strip()
+    return cleaned
+
+
+def build_output_filename(meta, video_id, ext, config, music_mode, *, template_override=_TEMPLATE_UNSET):
+    if music_mode:
+        template = template_override if template_override is not _TEMPLATE_UNSET else (
+            config.get("music_filename_template") if config else None
+        )
+        return build_music_filename(meta, ext, template=template, fallback_id=video_id)
+
+    template = template_override if template_override is not _TEMPLATE_UNSET else (
+        config.get("filename_template") if config else None
+    )
+    if template:
+        try:
+            return template % {
+                "title": sanitize_for_filesystem(meta.get("title") or video_id),
+                "uploader": sanitize_for_filesystem(meta.get("channel") or ""),
+                "upload_date": meta.get("upload_date") or "",
+                "ext": ext,
+            }
+        except Exception:
+            return f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}_{video_id[:8]}.{ext}"
+    return f"{pretty_filename(meta.get('title'), meta.get('channel'), meta.get('upload_date'))}_{video_id[:8]}.{ext}"
+
+
+def resolve_cookiefile(config):
+    cookies = (config or {}).get("yt_dlp_cookies")
+    if not cookies:
+        return None
+    try:
+        resolved = resolve_dir(cookies, TOKENS_DIR)
+    except ValueError as exc:
+        logging.error("Invalid yt-dlp cookies path: %s", exc)
+        return None
+    if not os.path.exists(resolved):
+        logging.warning("yt-dlp cookies file not found: %s", resolved)
+        return None
+    return resolved
+
+
+>>>>>>> Stashed changes
 # ------------------------------------------------------------------
 # Config + API
 # ------------------------------------------------------------------
@@ -994,10 +1246,17 @@ def run_single_download(config, video_url, destination=None, final_format_overri
                         *, paths, status=None, js_runtime_override=None, stop_event=None):
     """Download a single URL (no OAuth required)."""
     js_runtime = resolve_js_runtime(config, override=js_runtime_override)
+<<<<<<< Updated upstream
     meta = resolve_video_metadata(None, extract_video_id(video_url) or video_url)
 
     vid = meta.get("video_id") or extract_video_id(video_url) or "video"
     temp_dir = os.path.join(paths.temp_downloads_dir, vid)
+=======
+    cookies_path = resolve_cookiefile(config)
+    if music_mode and not cookies_path:
+        logging.warning("Music mode enabled without yt-dlp cookies; metadata quality may be degraded.")
+    vid = extract_video_id(video_url) or "video"
+>>>>>>> Stashed changes
 
     if stop_event and stop_event.is_set():
         logging.warning("[%s] Stop requested before single download", vid)
@@ -1005,7 +1264,7 @@ def run_single_download(config, video_url, destination=None, final_format_overri
 
     _status_set(status, "current_playlist_id", None)
     _status_set(status, "current_video_id", vid)
-    _status_set(status, "current_video_title", meta.get("title") or vid)
+    _status_set(status, "current_video_title", vid)
     _status_set(status, "progress_current", 0)
     _status_set(status, "progress_total", 1)
     _status_set(status, "progress_percent", 0)
@@ -1013,6 +1272,7 @@ def run_single_download(config, video_url, destination=None, final_format_overri
     _reset_video_progress(status)
     _status_set(status, "video_progress_percent", 0)
     _status_set(status, "video_downloaded_bytes", 0)
+<<<<<<< Updated upstream
 
     try:
         dest_dir = resolve_dir(
@@ -1021,6 +1281,58 @@ def run_single_download(config, video_url, destination=None, final_format_overri
         )
     except ValueError as exc:
         logging.error("Invalid destination path: %s", exc)
+=======
+    _status_set(status, "current_phase", "queued")
+    _status_set(status, "last_error_message", None)
+
+    dest_dir = None
+    if delivery_mode == "server":
+        try:
+            dest_dir = resolve_dir(
+                destination or config.get("single_download_folder") or paths.single_downloads_dir,
+                paths.single_downloads_dir,
+            )
+        except ValueError as exc:
+            logging.error("Invalid destination path: %s", exc)
+            _status_set(status, "last_error_message", f"Invalid destination path: {exc}")
+            _status_set(status, "progress_current", 1)
+            _status_set(status, "progress_total", 1)
+            _status_set(status, "progress_percent", 100)
+            _reset_video_progress(status)
+            _status_set(status, "current_video_id", None)
+            _status_set(status, "current_video_title", None)
+            _status_set(status, "current_phase", None)
+            return False
+        if not dry_run:
+            os.makedirs(dest_dir, exist_ok=True)
+    else:
+        dest_dir = os.path.join(paths.temp_downloads_dir, "client_delivery")
+        if not dry_run:
+            os.makedirs(dest_dir, exist_ok=True)
+
+    if dry_run:
+        format_ctx = _resolve_download_format({
+            "music_mode": music_mode,
+            "final_format": final_format_override,
+            "audio_only": False,
+            "config": config,
+        })
+        target_fmt = format_ctx["target_fmt"]
+        ext = target_fmt or final_format_override or config.get("final_format") or (
+            "mp3" if format_ctx["audio_mode"] else "webm"
+        )
+        output_template = config.get("music_filename_template") if music_mode else config.get("filename_template")
+        cleaned_name = build_output_filename(
+            {"title": vid, "channel": "", "upload_date": ""},
+            vid,
+            ext,
+            config,
+            music_mode,
+            template_override=output_template,
+        )
+        final_path = os.path.join(dest_dir or paths.single_downloads_dir, cleaned_name)
+        logging.info("Dry-run: would download %s → %s", vid, final_path)
+>>>>>>> Stashed changes
         _status_set(status, "progress_current", 1)
         _status_set(status, "progress_total", 1)
         _status_set(status, "progress_percent", 100)
@@ -1030,6 +1342,7 @@ def run_single_download(config, video_url, destination=None, final_format_overri
         return False
     os.makedirs(dest_dir, exist_ok=True)
 
+<<<<<<< Updated upstream
     local_file = download_with_ytdlp(
         video_url,
         temp_dir,
@@ -1037,9 +1350,42 @@ def run_single_download(config, video_url, destination=None, final_format_overri
         meta,
         config,
         target_format=final_format_override,
+=======
+    download_url = build_download_url(vid, music_mode=music_mode, source_url=video_url)
+    output_template = config.get("music_filename_template") if music_mode else config.get("filename_template")
+    store = DownloadJobStore(paths.db_path)
+    job_id = store.enqueue(
+        origin="search",
+        origin_id=vid,
+        media_type="audio" if music_mode else "video",
+        media_intent="track" if music_mode else "episode",
+        source="youtube_music" if music_mode else "youtube",
+        url=download_url,
+        output_template=output_template,
+        output_dir=dest_dir,
+        context={
+            "video_id": vid,
+            "delivery_mode": delivery_mode,
+            "target_format": final_format_override,
+            "audio_only": False,
+            "js_runtime": js_runtime,
+            "cookies_path": cookies_path,
+        },
+        max_attempts=config.get("job_max_attempts") if isinstance(config, dict) else None,
+    )
+    _status_set(status, "progress_current", 0)
+    _status_set(status, "progress_total", 1)
+    _status_set(status, "progress_percent", 0)
+    _status_set(status, "current_phase", "queued")
+
+    worker = DownloadWorkerEngine(
+        paths.db_path,
+>>>>>>> Stashed changes
         paths=paths,
+        config=config,
         status=status,
         stop_event=stop_event,
+<<<<<<< Updated upstream
     )
     if not local_file:
         logging.error("Download FAILED: %s", video_url)
@@ -1085,6 +1431,19 @@ def run_single_download(config, video_url, destination=None, final_format_overri
     _status_set(status, "current_video_id", None)
     _status_set(status, "current_video_title", None)
     return True
+=======
+        adapters={
+            "youtube": YouTubeAdapter(),
+            "youtube_music": YouTubeAdapter(),
+        },
+    )
+    worker.run_until_idle()
+
+    job = store.get_job(job_id)
+    ok = bool(job and job.status == "completed")
+    status.single_download_ok = ok
+    return ok
+>>>>>>> Stashed changes
 
 
 def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event=None):
@@ -1116,8 +1475,16 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
     playlists = config.get("playlists", []) or []
     js_runtime = resolve_js_runtime(config, override=js_runtime_override)
     global_final_format = config.get("final_format")
+<<<<<<< Updated upstream
+=======
+    preview_only = os.environ.get("YT_ARCHIVER_PREVIEW", "").strip().lower() in {"1", "true", "yes", "on"}
+    if dry_run:
+        logging.info("Dry-run enabled: no downloads or DB writes will occur")
+>>>>>>> Stashed changes
 
-    pending_copies = []
+    jobs_enqueued = 0
+    enqueued_urls = set()
+    job_store = DownloadJobStore(paths.db_path)
     yt_clients = build_youtube_clients(accounts, config) if accounts else {}
 
     try:
@@ -1191,6 +1558,21 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
             _status_set(status, "progress_total", total_videos)
             _status_set(status, "progress_current", completed)
             _status_set(status, "progress_percent", 0)
+<<<<<<< Updated upstream
+=======
+            format_ctx = _resolve_download_format({
+                "music_mode": playlist_music,
+                "final_format": playlist_format,
+                "audio_only": False,
+                "config": config,
+            })
+            target_fmt = format_ctx["target_fmt"]
+            dry_run_ext = target_fmt or playlist_format or config.get("final_format") or (
+                "mp3" if format_ctx["audio_mode"] else "webm"
+            )
+            output_template = config.get("music_filename_template") if playlist_music else config.get("filename_template")
+            source_name = "youtube_music" if playlist_music else "youtube"
+>>>>>>> Stashed changes
 
             for entry in videos:
                 if stop_event and stop_event.is_set():
@@ -1206,13 +1588,51 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
                 _status_set(status, "progress_percent", int((completed / total_videos) * 100))
                 _reset_video_progress(status)
 
+<<<<<<< Updated upstream
                 cur.execute("SELECT video_id FROM downloads WHERE video_id=?", (vid,))
                 if cur.fetchone():
+=======
+                if subscribe_mode:
+                    if is_video_seen(conn, playlist_id, vid):
+                        # Optimization: stop after the first known video when in subscribe mode.
+                        label = playlist_name or playlist_id
+                        logging.info('Subscribe: "%s" reached seen video %s; stopping scan.', label, vid)
+                        break
+                else:
+                    cur.execute("SELECT video_id FROM downloads WHERE video_id=?", (vid,))
+                    if cur.fetchone():
+                        completed += 1
+                        _status_set(status, "progress_current", completed)
+                        _status_set(status, "progress_percent", int((completed / total_videos) * 100))
+                        continue
+
+                video_url = build_download_url(vid, music_mode=playlist_music, source_url=entry.get("url"))
+                if dry_run:
+                    cleaned_name = build_output_filename(
+                        {"title": vid, "channel": "", "upload_date": ""},
+                        vid,
+                        dry_run_ext,
+                        config,
+                        playlist_music,
+                        template_override=output_template,
+                    )
+                    final_path = os.path.join(target_folder, cleaned_name)
+                    logging.info("Dry-run: would enqueue %s → %s", vid, final_path)
+                    completed += 1
+                    _status_set(status, "progress_current", completed)
+                    _status_set(status, "progress_percent", int((completed / total_videos) * 100))
+                    _status_set(status, "current_phase", None)
+                    continue
+
+                if video_url in enqueued_urls or job_store.has_active_job(source_name, video_url):
+                    logging.info("Skipping enqueue (already queued): %s", vid)
+>>>>>>> Stashed changes
                     completed += 1
                     _status_set(status, "progress_current", completed)
                     _status_set(status, "progress_percent", int((completed / total_videos) * 100))
                     continue
 
+<<<<<<< Updated upstream
                 meta = resolve_video_metadata(yt, vid, allow_public_fallback=allow_public)
                 _status_set(status, "current_video_title", meta.get("title") or vid)
                 _status_set(status, "video_progress_percent", 0)
@@ -1306,6 +1726,55 @@ def run_once(config, *, paths, status=None, js_runtime_override=None, stop_event
 
         for t in pending_copies:
             t.join()
+=======
+                job_store.enqueue(
+                    origin="playlist",
+                    origin_id=playlist_id,
+                    media_type="audio" if playlist_music else "video",
+                    media_intent="playlist",
+                    source=source_name,
+                    url=video_url,
+                    output_template=output_template,
+                    output_dir=target_folder,
+                    context={
+                        "video_id": vid,
+                        "playlist_item_id": entry.get("playlistItemId"),
+                        "remove_after_download": remove_after,
+                        "subscribe_mode": subscribe_mode,
+                        "account": account,
+                        "target_format": playlist_format,
+                        "audio_only": False,
+                        "js_runtime": js_runtime,
+                        "cookies_path": cookies_path,
+                        "delivery_mode": "server",
+                    },
+                    max_attempts=config.get("job_max_attempts") if isinstance(config, dict) else None,
+                )
+                enqueued_urls.add(video_url)
+                jobs_enqueued += 1
+                _status_set(status, "current_phase", "queued")
+                completed += 1
+                _status_set(status, "progress_current", completed)
+                _status_set(status, "progress_percent", int((completed / total_videos) * 100))
+
+        if jobs_enqueued and not dry_run:
+            _status_set(status, "progress_current", 0)
+            _status_set(status, "progress_total", jobs_enqueued)
+            _status_set(status, "progress_percent", 0)
+            worker = DownloadWorkerEngine(
+                paths.db_path,
+                paths=paths,
+                config=config,
+                status=status,
+                stop_event=stop_event,
+                adapters={
+                    "youtube": YouTubeAdapter(),
+                    "youtube_music": YouTubeAdapter(),
+                },
+            )
+            worker.run_until_idle()
+
+>>>>>>> Stashed changes
         logging.info("\n" + ("-" * 80) + "\n")
         logging.info("Run complete.")
         logging.info("\n" + ("-" * 80) + "\n \n \n")

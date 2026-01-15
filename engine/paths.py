@@ -25,6 +25,7 @@ TOKENS_DIR = _env_path("YT_ARCHIVER_TOKENS_DIR", PROJECT_ROOT / "tokens")
 class EnginePaths:
     log_dir: str
     db_path: str
+    search_db_path: str
     temp_downloads_dir: str
     single_downloads_dir: str
     lock_file: str
@@ -70,6 +71,7 @@ def resolve_dir(path, base_dir):
 
 def build_engine_paths():
     db_path = os.path.join(DATA_DIR, "database", "db.sqlite")
+    search_db_path = os.path.join(DATA_DIR, "database", "search_jobs.sqlite")
     temp_downloads_dir = os.path.join(DATA_DIR, "temp_downloads")
     lock_file = os.path.join(DATA_DIR, "tmp", "yt_archiver.lock")
     ytdlp_temp_dir = os.path.join(DATA_DIR, "tmp", "yt-dlp")
@@ -77,6 +79,7 @@ def build_engine_paths():
     return EnginePaths(
         log_dir=LOG_DIR,
         db_path=db_path,
+        search_db_path=search_db_path,
         temp_downloads_dir=temp_downloads_dir,
         single_downloads_dir=DOWNLOADS_DIR,
         lock_file=lock_file,
