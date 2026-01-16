@@ -1,5 +1,5 @@
-# YouTube Archiver
-ATTENTION!
+# ATTENTION!
+
 YouTube-Archiver is now rebranded as Retreivr and the live repo is being migrated to: 
 https://github.com/Retreivr/retreivr
 
